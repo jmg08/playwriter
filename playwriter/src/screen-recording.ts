@@ -42,6 +42,30 @@ export function getChromeRestartCommand(): string {
   return `pkill chrome; sleep 1; google-chrome ${flags}`
 }
 
+const DEFAULT_ASPECT_RATIO = { width: 16, height: 9 }
+
+/** Default max recording duration: 15 minutes in milliseconds */
+const DEFAULT_MAX_DURATION_MS = 15 * 60 * 1000
+
+/**
+ * Compute the largest viewport that fits inside `current` at the target aspect ratio.
+ * Never increases width or height beyond current values — only shrinks the
+ * dimension that's "too large" relative to the target ratio.
+ */
+export function fitToAspectRatio(
+  current: { width: number; height: number },
+  ratio: { width: number; height: number } = DEFAULT_ASPECT_RATIO,
+): { width: number; height: number } {
+  const targetRatio = ratio.width / ratio.height
+  const currentRatio = current.width / current.height
+  if (currentRatio > targetRatio) {
+    // Too wide — keep height, shrink width
+    return { width: Math.round(current.height * targetRatio), height: current.height }
+  }
+  // Too tall (or already exact) — keep width, shrink height
+  return { width: current.width, height: Math.round(current.width / targetRatio) }
+}
+
 /**
  * Check if an error is related to missing activeTab permission for recording.
  */
@@ -70,6 +94,12 @@ export interface StartRecordingOptions {
   outputPath: string
   /** Relay server port (default: 19988) */
   relayPort?: number
+  /** Aspect ratio to fit viewport to before recording (default: { width: 16, height: 9 }).
+   *  Set to null to skip viewport resizing. */
+  aspectRatio?: { width: number; height: number } | null
+  /** Max recording duration in ms (default: 15 min = 900000). Auto-stops recording
+   *  when exceeded to prevent accidentally filling disk. Set to 0 or Infinity to disable. */
+  maxDurationMs?: number
 }
 
 export interface StopRecordingOptions {
@@ -152,6 +182,11 @@ export function createRecordingApi(options: CreateRecordingApiOptions): {
 } {
   const { context, defaultPage, relayPort, ghostCursorController, onStart, onFinish, getExecutionTimestamps } = options
 
+  // Stores the original viewport before aspect-ratio resize so we can restore on stop/cancel
+  let preRecordingViewport: { width: number; height: number } | null = null
+  // Auto-stop timer to prevent unbounded recordings
+  let maxDurationTimer: ReturnType<typeof setTimeout> | null = null
+
   const startWithDefaults = withRecordingDefaults<StartRecordingWithDefaultsOptions, RecordingState>({
     relayPort,
     defaultPage,
@@ -176,28 +211,74 @@ export function createRecordingApi(options: CreateRecordingApiOptions): {
 
   const start = async (opts?: StartRecordingWithDefaultsOptions): Promise<RecordingState> => {
     const targetPage = resolveRecordingTargetPage({ context, defaultPage, ghostCursorController, target: opts })
+
+    // Resize viewport to target aspect ratio (default 16:9) before recording.
+    // Only shrinks — never increases width or height beyond current values.
+    const aspectRatio = opts?.aspectRatio === undefined ? DEFAULT_ASPECT_RATIO : opts.aspectRatio
+    if (aspectRatio) {
+      const current = targetPage.viewportSize()
+      if (current) {
+        const fitted = fitToAspectRatio(current, aspectRatio)
+        if (fitted.width !== current.width || fitted.height !== current.height) {
+          preRecordingViewport = current
+          await targetPage.setViewportSize(fitted)
+        }
+      }
+    }
+
     const result = await startWithDefaults(opts)
     onStart()
     await ghostCursorController.enableForRecording({ page: targetPage })
+
+    // Schedule auto-stop to prevent unbounded recordings filling disk.
+    // Default 15 min. Set maxDurationMs to 0 or Infinity to disable.
+    const maxMs = opts?.maxDurationMs ?? DEFAULT_MAX_DURATION_MS
+    if (maxMs > 0 && maxMs < Infinity) {
+      maxDurationTimer = setTimeout(() => {
+        maxDurationTimer = null
+        stop(opts ? { page: opts.page, sessionId: opts.sessionId } : undefined).catch(() => {})
+      }, maxMs)
+    }
+
     return result
+  }
+
+  const clearMaxDurationTimer = (): void => {
+    if (maxDurationTimer) {
+      clearTimeout(maxDurationTimer)
+      maxDurationTimer = null
+    }
+  }
+
+  const restoreViewport = async (targetPage: Page): Promise<void> => {
+    if (!preRecordingViewport) {
+      return
+    }
+    const saved = preRecordingViewport
+    preRecordingViewport = null
+    await targetPage.setViewportSize(saved)
   }
 
   const stop = async (
     opts?: StopRecordingWithDefaultsOptions,
   ): Promise<{ path: string; duration: number; size: number; executionTimestamps: ExecutionTimestamp[] }> => {
+    clearMaxDurationTimer()
     const targetPage = resolveRecordingTargetPage({ context, defaultPage, ghostCursorController, target: opts })
     const result = await stopWithDefaults(opts)
     const executionTimestamps = [...getExecutionTimestamps()]
     onFinish()
     await ghostCursorController.disableForRecording({ page: targetPage })
+    await restoreViewport(targetPage)
     return { ...result, executionTimestamps }
   }
 
   const cancel = async (opts?: CancelRecordingWithDefaultsOptions): Promise<void> => {
+    clearMaxDurationTimer()
     const targetPage = resolveRecordingTargetPage({ context, defaultPage, ghostCursorController, target: opts })
     await cancelWithDefaults(opts)
     onFinish()
     await ghostCursorController.disableForRecording({ page: targetPage })
+    await restoreViewport(targetPage)
   }
 
   return {

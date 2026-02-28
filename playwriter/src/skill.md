@@ -942,6 +942,8 @@ For demos where cursor movement should be visible and human-like, drive the page
 
 **Note**: Recording requires the user to have clicked the Playwriter extension icon on the tab. This grants `activeTab` permission needed for `chrome.tabCapture`. Recording works on tabs where the icon was clicked - if you need to record a new tab, ask the user to click the icon on it first.
 
+Recording auto-resizes the viewport to 16:9 aspect ratio before starting (shrink-to-fit, never increases dimensions). Override with `aspectRatio` or set `null` to skip. Recording also auto-stops after 15 minutes by default to prevent filling disk. For longer recordings, pass a higher `maxDurationMs` (e.g. `maxDurationMs: 60 * 60 * 1000` for 1 hour) or `0` to disable.
+
 ```js
 // Start recording - outputPath must be specified upfront
 await recording.start({
@@ -950,6 +952,8 @@ await recording.start({
   frameRate: 30, // default: 30
   audio: false, // default: false (tab audio)
   videoBitsPerSecond: 2500000, // 2.5 Mbps
+  aspectRatio: { width: 16, height: 9 }, // default: 16:9, set null to skip
+  maxDurationMs: 15 * 60 * 1000, // default: 15 min, set 0 to disable
 })
 
 // Navigate around - recording continues!
