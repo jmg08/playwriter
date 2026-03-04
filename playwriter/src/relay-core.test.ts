@@ -40,6 +40,30 @@ describe('Relay Core Tests', () => {
     return testCtx.browserContext
   }
 
+  const ensureConnectedTabForExecute = async (): Promise<void> => {
+    const browserContext = getBrowserContext()
+    const serviceWorker = await getExtensionServiceWorker(browserContext)
+    const connectedTabCount = await serviceWorker.evaluate(async () => {
+      const state = globalThis.getExtensionState()
+      return state.tabs.size
+    })
+    if (connectedTabCount > 0) {
+      return
+    }
+
+    const page = await browserContext.newPage()
+    await page.goto('about:blank')
+    await page.bringToFront()
+
+    await serviceWorker.evaluate(async () => {
+      await globalThis.toggleExtensionForActiveTab()
+    })
+
+    await new Promise((r) => {
+      setTimeout(r, 100)
+    })
+  }
+
   it('should inject script via addScriptTag through CDP relay', async () => {
     const browserContext = getBrowserContext()
     const serviceWorker = await withTimeout({
@@ -1020,6 +1044,8 @@ describe('Relay Core Tests', () => {
   }, 60000)
 
   it('should show descriptive error when clicking a hidden element', async () => {
+    await ensureConnectedTabForExecute()
+
     // Create a fresh page and set content with a collapsed details element
     await client.callTool({
       name: 'execute',
@@ -1073,6 +1099,8 @@ describe('Relay Core Tests', () => {
   }, 30000)
 
   it('should show descriptive error when clicking an element covered by another', async () => {
+    await ensureConnectedTabForExecute()
+
     await client.callTool({
       name: 'execute',
       arguments: {
@@ -1130,6 +1158,8 @@ describe('Relay Core Tests', () => {
   }, 30000)
 
   it('should show descriptive error when clicking a display:none element', async () => {
+    await ensureConnectedTabForExecute()
+
     await client.callTool({
       name: 'execute',
       arguments: {
