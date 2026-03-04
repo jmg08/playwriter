@@ -1260,7 +1260,9 @@ export async function getAriaSnapshot({
       }, scopeAttr)
     }
     if (oopifSessionId) {
-      await session.send('Target.detachFromTarget', { sessionId: oopifSessionId }).catch(() => {})
+      await session.send('Target.detachFromTarget', { sessionId: oopifSessionId }).catch((e) => {
+        console.error('[aria-snapshot] Failed to detach OOPIF session:', oopifSessionId, e)
+      })
     }
     if (!cdp) {
       await session.detach()

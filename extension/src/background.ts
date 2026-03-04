@@ -102,6 +102,9 @@ async function getExtensionIdentity(): Promise<ExtensionIdentity> {
   return identityPromise
 }
 
+const TAB_GROUP_COLOR: chrome.tabGroups.ColorEnum = 'green'
+const TAB_GROUP_TITLE = 'playwriter'
+
 let childSessions: Map<string, { tabId: number; targetId?: string }> = new Map()
 let nextSessionId = 1
 let tabGroupQueue: Promise<void> = Promise.resolve()
@@ -722,7 +725,7 @@ async function syncTabGroup(): Promise<void> {
       .map(([tabId]) => tabId)
 
     // Always query by title - no cached ID that can go stale
-    const existingGroups = await chrome.tabGroups.query({ title: 'playwriter' })
+    const existingGroups = await chrome.tabGroups.query({ title: TAB_GROUP_TITLE })
 
     // If no connected tabs, clear any existing playwriter groups
     if (connectedTabIds.length === 0) {
@@ -771,12 +774,17 @@ async function syncTabGroup(): Promise<void> {
     if (tabsToAdd.length > 0) {
       if (groupId === undefined) {
         const newGroupId = await chrome.tabs.group({ tabIds: tabsToAdd })
-        await chrome.tabGroups.update(newGroupId, { title: 'playwriter', color: 'green' })
+        await chrome.tabGroups.update(newGroupId, { title: TAB_GROUP_TITLE, color: TAB_GROUP_COLOR })
         logger.debug('Created tab group:', newGroupId, 'with tabs:', tabsToAdd)
       } else {
         await chrome.tabs.group({ tabIds: tabsToAdd, groupId })
+        await chrome.tabGroups.update(groupId, { title: TAB_GROUP_TITLE, color: TAB_GROUP_COLOR })
         logger.debug('Added tabs to existing group:', tabsToAdd)
       }
+    } else if (groupId !== undefined) {
+      // No tabs to add, but ensure the existing group keeps the right color/title.
+      // Chrome can reset these on group collapse/expand or tab moves.
+      await chrome.tabGroups.update(groupId, { title: TAB_GROUP_TITLE, color: TAB_GROUP_COLOR })
     }
   } catch (error: any) {
     logger.debug('Failed to sync tab group:', error.message)
@@ -820,37 +828,61 @@ function emitChildDetachesForTab(tabId: number): void {
   })
 }
 
+// Resolve which tab a CDP command targets by checking sessionId sources in priority order:
+// 1. Top-level sessionId (the CDP session the command was sent on)
+// 2. params.sessionId (e.g. Target.detachFromTarget on the root session, see #40)
+// 3. params.targetId (e.g. Target.closeTarget)
+function getTabForCommand(msg: ExtensionCommandMessage): { tabId: number; tab: TabInfo } | undefined {
+  const sessionId = msg.params.sessionId
+  if (sessionId) {
+    const found = getTabBySessionId(sessionId)
+    if (found) {
+      return found
+    }
+    const child = childSessions.get(sessionId)
+    if (child) {
+      const tab = store.getState().tabs.get(child.tabId)
+      if (tab) {
+        return { tabId: child.tabId, tab }
+      }
+    }
+  }
+
+  const paramsSessionId =
+    msg.params.params && 'sessionId' in msg.params.params && typeof msg.params.params.sessionId === 'string'
+      ? msg.params.params.sessionId
+      : undefined
+  if (paramsSessionId) {
+    const found = getTabBySessionId(paramsSessionId)
+    if (found) {
+      return found
+    }
+    const child = childSessions.get(paramsSessionId)
+    if (child) {
+      const tab = store.getState().tabs.get(child.tabId)
+      if (tab) {
+        return { tabId: child.tabId, tab }
+      }
+    }
+  }
+
+  const targetId =
+    msg.params.params && 'targetId' in msg.params.params && typeof msg.params.params.targetId === 'string'
+      ? msg.params.params.targetId
+      : undefined
+  if (targetId) {
+    return getTabByTargetId(targetId)
+  }
+
+  return undefined
+}
+
 async function handleCommand(msg: ExtensionCommandMessage): Promise<any> {
   if (msg.method !== 'forwardCDPCommand') return
 
-  let targetTabId: number | undefined
-  let targetTab: TabInfo | undefined
-
-  if (msg.params.sessionId) {
-    const found = getTabBySessionId(msg.params.sessionId)
-    if (found) {
-      targetTabId = found.tabId
-      targetTab = found.tab
-    }
-  }
-
-  if (!targetTab && msg.params.sessionId) {
-    const childSession = childSessions.get(msg.params.sessionId)
-    if (childSession) {
-      targetTabId = childSession.tabId
-      targetTab = store.getState().tabs.get(childSession.tabId)
-      logger.debug('Found parent tab for child session:', msg.params.sessionId, 'tabId:', childSession.tabId)
-    }
-  }
-
-  if (!targetTab && msg.params.params && 'targetId' in msg.params.params && msg.params.params.targetId) {
-    const found = getTabByTargetId(msg.params.params.targetId as string)
-    if (found) {
-      targetTabId = found.tabId
-      targetTab = found.tab
-      logger.debug('Found tab for targetId:', msg.params.params.targetId, 'tabId:', targetTabId)
-    }
-  }
+  const resolved = getTabForCommand(msg)
+  let targetTabId = resolved?.tabId
+  let targetTab = resolved?.tab
 
   const debuggee = targetTabId ? { tabId: targetTabId } : undefined
 
@@ -936,6 +968,11 @@ async function handleCommand(msg: ExtensionCommandMessage): Promise<any> {
   }
 
   if (!debuggee || !targetTab) {
+    // Target.detachFromTarget is best-effort — no-op if the session is already gone (#40).
+    if (msg.params.method === 'Target.detachFromTarget') {
+      return {}
+    }
+
     throw new Error(
       `No tab found for method ${msg.params.method} sessionId: ${msg.params.sessionId} params: ${JSON.stringify(msg.params.params || null)}`,
     )
@@ -1601,7 +1638,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     tabGroupQueue = tabGroupQueue
       .then(async () => {
         // Query for playwriter group by title - no stale cached ID
-        const existingGroups = await chrome.tabGroups.query({ title: 'playwriter' })
+        const existingGroups = await chrome.tabGroups.query({ title: TAB_GROUP_TITLE })
         const groupId = existingGroups[0]?.id
         if (groupId === undefined) {
           return

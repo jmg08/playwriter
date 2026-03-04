@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { chromium, type Page } from '@xmorse/playwright-core'
+import WebSocket from 'ws'
 import { getCdpUrl } from './utils.js'
 import {
   setupTestContext,
@@ -625,4 +626,135 @@ describe('Relay Navigation Tests', () => {
     fs.unlinkSync(outputPath)
     fs.unlinkSync(demoPath)
   }, 60000)
+
+  // Regression test for https://github.com/remorses/playwriter/issues/40
+  // When Playwright sends Target.detachFromTarget on the root CDP session (no top-level
+  // sessionId), the extension must still route the command by looking at params.sessionId.
+  // Previously the extension threw "No tab found for method Target.detachFromTarget"
+  // because it only checked the top-level sessionId for routing, which is absent on root
+  // session commands. This caused cascading disconnects and instability.
+  it('should route Target.detachFromTarget without top-level sessionId (issue #40)', async () => {
+    const browserContext = getBrowserContext()
+    const serviceWorker = await getExtensionServiceWorker(browserContext)
+
+    const server = await createSimpleServer({
+      routes: { '/': '<!doctype html><html><body>detach test</body></html>' },
+    })
+
+    const page = await browserContext.newPage()
+    try {
+      await page.goto(server.baseUrl, { waitUntil: 'domcontentloaded' })
+      await page.bringToFront()
+
+      await withTimeout({
+        promise: serviceWorker.evaluate(async () => {
+          await globalThis.toggleExtensionForActiveTab()
+        }),
+        timeoutMs: 5000,
+        errorMessage: 'Timed out toggling extension for detach test',
+      })
+      await new Promise((r) => {
+        setTimeout(r, 400)
+      })
+
+      // Connect a raw WebSocket to the relay — this lets us send CDP messages
+      // exactly as they appear on the wire, without Playwright adding sessionId.
+      const ws = new WebSocket(`ws://localhost:${TEST_PORT}/cdp/test-detach-raw`)
+      await new Promise<void>((resolve, reject) => {
+        ws.on('open', () => {
+          resolve()
+        })
+        ws.on('error', reject)
+      })
+
+      let nextId = 1
+      const sendCdp = <T = unknown>(msg: Record<string, unknown>): Promise<T> => {
+        return new Promise((resolve, reject) => {
+          const id = nextId++
+          const timeout = setTimeout(() => {
+            ws.off('message', handler)
+            reject(new Error(`CDP response timeout for id ${id}`))
+          }, 5000)
+
+          const handler = (data: WebSocket.RawData) => {
+            const parsed = JSON.parse(data.toString())
+            if (parsed.id === id) {
+              ws.off('message', handler)
+              clearTimeout(timeout)
+              resolve(parsed as T)
+            }
+          }
+          ws.on('message', handler)
+          ws.send(JSON.stringify({ id, ...msg }))
+        })
+      }
+
+      // Collect async events from the relay
+      const events: Array<{ method: string; params: Record<string, unknown>; sessionId?: string }> = []
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString())
+        if (!msg.id && msg.method) {
+          events.push(msg)
+        }
+      })
+
+      // Trigger Target.setAutoAttach so the relay sends Target.attachedToTarget for
+      // all connected tabs. This gives us the page's pw-tab-* sessionId.
+      await sendCdp({
+        method: 'Target.setAutoAttach',
+        params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+      })
+
+      // Wait for events to arrive
+      await new Promise((r) => {
+        setTimeout(r, 500)
+      })
+
+      // Filter for the specific page target by URL to avoid grabbing wrong sessions
+      // (welcome tab, extension pages, etc.)
+      type AttachParams = { sessionId?: string; targetInfo?: { type?: string; url?: string } }
+      const attachEvent = events.find((e) => {
+        if (e.method !== 'Target.attachedToTarget') {
+          return false
+        }
+        const p = e.params as AttachParams
+        return p.targetInfo?.type === 'page' && p.targetInfo?.url?.startsWith(server.baseUrl)
+      })
+      expect(attachEvent).toBeDefined()
+      const pageSessionId = (attachEvent!.params as AttachParams).sessionId
+      expect(pageSessionId).toBeTruthy()
+
+      // Verify the session is usable before detach — send a command that requires routing.
+      const evalBefore = await sendCdp<{ id: number; error?: { message: string }; result?: unknown }>({
+        method: 'Runtime.evaluate',
+        sessionId: pageSessionId,
+        params: { expression: '1 + 1', returnByValue: true },
+      })
+      expect(evalBefore.error).toBeUndefined()
+      expect((evalBefore.result as { result?: { value?: number } })?.result?.value).toBe(2)
+
+      // NOW: send Target.detachFromTarget WITHOUT a top-level sessionId.
+      // This is the exact wire format Playwright uses when sending on the root session
+      // (e.g. from CRSession.detach() where _parentSession is the root browser session).
+      // The extension must route this by looking at params.sessionId.
+      const detachResult = await sendCdp<{ id: number; error?: { message: string }; result?: unknown }>({
+        method: 'Target.detachFromTarget',
+        // Intentionally NO sessionId field — this is the root session
+        params: { sessionId: pageSessionId },
+      })
+
+      // Must not fail with extension routing error — the command must reach Chrome.
+      // Chrome returns "No session with given id" because pw-tab-* is a virtual session
+      // managed by the relay, not a real Chrome CDP session. This is expected — the key
+      // proof is that the extension routed the command to Chrome instead of throwing
+      // "No tab found" at the routing layer.
+      expect(detachResult.error?.message).not.toContain('No tab found')
+      expect(detachResult.error?.message).toContain('No session with given id')
+
+      ws.close()
+    } finally {
+      await page.close()
+      await server.close()
+    }
+  }, 30000)
 })
