@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.77
+
+### Changes
+
+- **Use `workspace:^` for local Playwriter dependency**: Switched `playwriter` from `workspace:*` to `workspace:^` in `extension/package.json` to avoid pinned workspace versions when package metadata is packed.
+
 ## 0.0.76
 
 ### Bug Fixes

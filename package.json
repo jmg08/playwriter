@@ -25,6 +25,6 @@
   "author": "remorses <beats.by.morse@gmail.com>",
   "license": "",
   "dependencies": {
-    "mcp-extension": "workspace:*"
+    "mcp-extension": "workspace:^"
   }
 }

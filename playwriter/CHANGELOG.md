@@ -1,52 +1,10 @@
 # Changelog
 
-## 0.0.88
+## 0.0.89
 
-### Improvements
-
-- **Inline download behavior normalization in relay**: Removed the standalone `toPageDownloadBehavior` helper and inlined the `allowAndName -> allow` mapping at the call site to keep the download-behavior forwarding path more direct.
-
-## 0.0.87
-
-### Improvements
-
-- **Simplify relay download compatibility path**: Extracted Browser-download compatibility emission into a focused helper and simplified download-behavior mapping logic in the relay, while keeping dual `Page.download*` + `Browser.download*` forwarding behavior and improving test assertions to include `Page.setDownloadBehavior` forwarding.
-
-## 0.0.86
-
-### Bug Fixes
-
-- **Fix extension-mode downloads for Playwright clients**: Relay now translates `Browser.setDownloadBehavior` into per-target `Page.setDownloadBehavior`, caches the behavior for future page targets, and emits both `Page.download*` and synthetic root-session `Browser.download*` events so `page.waitForEvent('download')` works while preserving backward compatibility for clients that still rely on `Page.downloadWillBegin`/`Page.downloadProgress`.
-
-## 0.0.85
-
-### Bug Fixes
-
-- **Revert ghost cursor init-script persistence**: Removed the `Page.addScriptToEvaluateOnNewDocument` cursor injection path (`addGhostCursorInitScript`) and restored direct per-page injection behavior used before, since the init-script approach did not work reliably in practice.
-
-## 0.0.84
-
-### Docs
-
-- **Remove click-timeout section from `skill.md` mistakes list**: Deleted the dedicated post-click timeout section per docs cleanup request and renumbered the following mistake item.
-
-## 0.0.83
-
-### Docs
-
-- **Correct click-timeout guidance in `skill.md`**: Replaced the incorrect "SPA does not fire load" explanation with the actual behavior: click succeeds, then Playwright times out during post-click navigation waiting when action timeout budget is exceeded.
-
-## 0.0.82
-
-### Improvements
-
-- **Increase default action timeout to 60s**: Raised `context.setDefaultTimeout` from `5000ms` to `60000ms` to avoid false click failures on slower real-world flows where the interaction succeeds but Playwright post-action navigation waiting exceeds short budgets.
-
-## 0.0.81
-
-### Improvements
-
-- **Increase default action timeout to 5s**: Raised `context.setDefaultTimeout` from `2000ms` to `5000ms` to reduce false `locator.click()` timeouts on slower navigation flows (for example GitHub/Turbo links) where the click succeeds but post-click navigation settling exceeds 2 seconds. Default navigation timeout remains `10000ms`.
+1. **More reliable downloads in extension mode** — download behavior now stays compatible with both `Page.download*` and `Browser.download*` event paths, so Playwright flows like `page.waitForEvent('download')` work consistently when connected through the relay.
+2. **Default action timeout is now 60 seconds** — reduced false click failures on slower, real-world pages where the interaction succeeds but post-action waiting previously exceeded short timeout budgets.
+3. **Ghost cursor injection is more stable** — recording flows now use direct per-page cursor injection again, avoiding the unreliable init-script persistence path used in prior builds.
 
 ## 0.0.80
 
