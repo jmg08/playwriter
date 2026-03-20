@@ -171,6 +171,7 @@ async function executeCode(options: {
     const result = (await response.json()) as {
       text: string
       images: Array<{ data: string; mimeType: string }>
+      screenshots: Array<{ path: string; snapshot: string; labelCount: number }>
       isError: boolean
     }
 
@@ -183,9 +184,13 @@ async function executeCode(options: {
       }
     }
 
-    // Note: images are base64 encoded, we could save them to files if needed
-    if (result.images && result.images.length > 0) {
-      console.log(`\n${result.images.length} screenshot(s) captured`)
+    // CLI: show screenshot path + snapshot text (no inline image)
+    if (result.screenshots && result.screenshots.length > 0) {
+      for (const s of result.screenshots) {
+        console.log(`\nScreenshot saved to: ${s.path}`)
+        console.log(`Labels shown: ${s.labelCount}\n`)
+        console.log(`Accessibility snapshot:\n${s.snapshot}`)
+      }
     }
 
     if (result.isError) {

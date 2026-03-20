@@ -986,8 +986,7 @@ describe('Snapshot & Screenshot Tests', () => {
     const textContent = content.find((c) => c.type === 'text')
     expect(textContent).toBeDefined()
     expect(textContent.text).toContain('Screenshot saved to:')
-    expect(textContent.text).toContain('.jpg')
-    expect(textContent.text).toContain('Labels shown:')
+    expect(textContent.text).toContain('image included below')
     expect(textContent.text).toContain('Accessibility snapshot:')
     expect(textContent.text).toContain('Submit Form')
 

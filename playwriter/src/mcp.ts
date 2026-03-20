@@ -203,8 +203,19 @@ server.tool(
       const result = await exec.execute(code, timeout)
 
       // Transform executor result to MCP format
+      // Append screenshot metadata to text for MCP (image is included inline as content)
+      const MAX_TEXT = 10000
+      let text = result.text
+      for (const s of result.screenshots) {
+        text += `\nScreenshot saved to: ${s.path} (image included below, ${s.labelCount} labels)\n`
+        text += `Accessibility snapshot:\n${s.snapshot}\n`
+      }
+      if (text.length > MAX_TEXT) {
+        text = text.slice(0, MAX_TEXT) + '\n\n[Truncated]'
+      }
+
       const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [
-        { type: 'text', text: result.text },
+        { type: 'text', text },
       ]
 
       for (const image of result.images) {

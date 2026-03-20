@@ -1827,7 +1827,7 @@ export async function startPlayWriterCDPRelayServer({
       const existingExecutor = manager.getSession(sessionId)
       if (!existingExecutor) {
         return c.json(
-          { text: `Session ${sessionId} not found. Run 'playwriter session new' first.`, images: [], isError: true },
+          { text: `Session ${sessionId} not found. Run 'playwriter session new' first.`, images: [], screenshots: [], isError: true },
           404,
         )
       }
@@ -1836,7 +1836,7 @@ export async function startPlayWriterCDPRelayServer({
       return c.json(result)
     } catch (error: any) {
       logger?.error('Execute endpoint error:', error)
-      return c.json({ text: `Server error: ${error.message}`, images: [], isError: true }, 500)
+      return c.json({ text: `Server error: ${error.message}`, images: [], screenshots: [], isError: true }, 500)
     }
   })
 

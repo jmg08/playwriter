@@ -192,9 +192,18 @@ const ALLOWED_MODULES = new Set([
   'node:fs',
 ])
 
+export interface ExecuteScreenshot {
+  path: string
+  base64: string
+  mimeType: 'image/jpeg'
+  snapshot: string
+  labelCount: number
+}
+
 export interface ExecuteResult {
   text: string
   images: Array<{ data: string; mimeType: string }>
+  screenshots: ExecuteScreenshot[]
   isError: boolean
 }
 
@@ -1161,12 +1170,6 @@ export class PlaywrightExecutor {
         responseText = 'Code executed successfully (no output)'
       }
 
-      for (const screenshot of screenshotCollector) {
-        responseText += `\nScreenshot saved to: ${screenshot.path}\n`
-        responseText += `Labels shown: ${screenshot.labelCount}\n\n`
-        responseText += `Accessibility snapshot:\n${screenshot.snapshot}\n`
-      }
-
       const MAX_LENGTH = 10000
       let finalText = responseText.trim()
       if (finalText.length > MAX_LENGTH) {
@@ -1176,8 +1179,15 @@ export class PlaywrightExecutor {
       }
 
       const images = screenshotCollector.map((s) => ({ data: s.base64, mimeType: s.mimeType }))
+      const screenshots: ExecuteScreenshot[] = screenshotCollector.map((s) => ({
+        path: s.path,
+        base64: s.base64,
+        mimeType: s.mimeType,
+        snapshot: s.snapshot,
+        labelCount: s.labelCount,
+      }))
 
-      return { text: finalText, images, isError: false }
+      return { text: finalText, images, screenshots, isError: false }
     } catch (error: any) {
       const errorStack = error.stack || error.message
       const isTimeoutError =
@@ -1196,6 +1206,7 @@ export class PlaywrightExecutor {
       return {
         text: `${logsText}${warningText}\nError executing code: ${errorText}${resetHint}`,
         images: [],
+        screenshots: [],
         isError: true,
       }
     }
