@@ -28,6 +28,7 @@ import {
   getExtensionStatus,
   type ExtensionStatus,
 } from './relay-client.js'
+import { discoverChromeInstances, type DiscoveredInstance } from './chrome-discovery.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -107,10 +108,11 @@ cli
   .command('', 'Start the MCP server or controls the browser with -e')
   .option('--host <host>', 'Remote relay server host to connect to (or use PLAYWRITER_HOST env var)')
   .option('--token <token>', 'Authentication token (or use PLAYWRITER_TOKEN env var)')
+  .option('--direct [endpoint]', 'Use direct CDP connection for MCP (auto-discover or ws:// endpoint, or use PLAYWRITER_DIRECT env var)')
   .option('-s, --session <name>', 'Session ID (required for -e, get one with `playwriter session new`)')
   .option('-e, --eval <code>', 'Execute JavaScript code and exit, read https://playwriter.dev/SKILL.md for usage')
   .option('--timeout <ms>', 'Execution timeout in milliseconds', { default: 10000 })
-  .action(async (options: { host?: string; token?: string; eval?: string; timeout?: number; session?: string }) => {
+  .action(async (options: { host?: string; token?: string; direct?: boolean | string; eval?: string; timeout?: number; session?: string }) => {
     // If -e flag is provided, execute code via relay server
     if (options.eval) {
       await executeCode({
@@ -123,11 +125,15 @@ cli
       return
     }
 
+    // Resolve --direct flag to env var value
+    const directValue = typeof options.direct === 'string' ? options.direct : options.direct === true ? 'auto' : undefined
+
     // Otherwise start the MCP server
     const { startMcp } = await import('./mcp.js')
     await startMcp({
       host: options.host,
       token: options.token,
+      direct: directValue,
     })
   })
 
@@ -284,13 +290,97 @@ async function executeCode(options: {
 }
 
 // Session management commands
+// Unified browser option type used in the multi-browser selection table
+interface BrowserOption {
+  key: string
+  type: 'extension' | 'direct'
+  browser: string
+  profile: string
+  /** For extension entries */
+  extensionId?: string | null
+  /** For direct CDP entries */
+  wsUrl?: string
+}
+
 cli
   .command('session new', 'Create a new session and print the session ID')
   .option('--host <host>', 'Remote relay server host')
-  .option('--browser <stableKey>', 'Stable browser key when multiple browsers are connected')
-  .action(async (options: { host?: string; browser?: string }) => {
+  .option('--browser <key>', 'Browser key when multiple browsers are available')
+  .option('--direct [endpoint]', 'Use direct CDP connection (auto-discover or specify ws:// endpoint)')
+  .action(async (options: { host?: string; browser?: string; direct?: boolean | string }) => {
     const isLocal = !options.host && !process.env.PLAYWRITER_HOST
+    const directEndpoint = typeof options.direct === 'string' ? options.direct : null
 
+    // If --direct with explicit endpoint, skip all discovery
+    if (directEndpoint) {
+      await ensureRelayForSessionCreation(isLocal)
+      const serverUrl = await getServerUrl(options.host)
+      const result = await createDirectSession({ serverUrl, cdpEndpoint: directEndpoint })
+      console.log(`Session ${result.id} created (direct CDP). Use with: playwriter -s ${result.id} -e "..."`)
+      console.log(pc.dim('NOTE: Recording unavailable in direct CDP mode.'))
+      return
+    }
+
+    // If --direct with no endpoint, discover Chrome instances
+    if (options.direct === true) {
+      if (!isLocal) {
+        console.error('Error: --direct auto-discovery only works locally.')
+        console.error('For remote relay, pass an explicit endpoint reachable from the relay host:')
+        console.error('  playwriter session new --host <host> --direct ws://relay-host:9222/devtools/browser/...')
+        process.exit(1)
+      }
+      await ensureRelayForSessionCreation(isLocal)
+      console.log(pc.dim('Discovering Chrome instances with debugging enabled...'))
+      const instances = await discoverChromeInstances()
+
+      if (instances.length === 0) {
+        console.error('No Chrome instances with debugging enabled found.')
+        console.error('')
+        console.error('Enable debugging in one of these ways:')
+        console.error('  1. Open chrome://inspect/#remote-debugging in Chrome')
+        console.error('  2. Launch Chrome with: chrome --remote-debugging-port=9222')
+        process.exit(1)
+      }
+
+      if (instances.length === 1 && !options.browser) {
+        const instance = instances[0]
+        const serverUrl = await getServerUrl(options.host)
+        const result = await createDirectSession({ serverUrl, cdpEndpoint: instance.wsUrl })
+        const profileLabel = formatInstanceProfiles(instance)
+        console.log(
+          `Session ${result.id} created (direct CDP, ${instance.browser}${profileLabel}). Use with: playwriter -s ${result.id} -e "..."`,
+        )
+        console.log(pc.dim('NOTE: Recording unavailable in direct CDP mode.'))
+        return
+      }
+
+      // Multiple instances or --browser specified
+      const directOptions = instances.map((instance) => {
+        return instanceToBrowserOption(instance)
+      })
+
+      if (options.browser) {
+        const selected = directOptions.find((opt) => {
+          return opt.key === options.browser
+        })
+        if (!selected) {
+          console.error(`Browser not found: ${options.browser}`)
+          console.error('Available: ' + directOptions.map((opt) => opt.key).join(', '))
+          process.exit(1)
+        }
+        const serverUrl = await getServerUrl(options.host)
+        const result = await createDirectSession({ serverUrl, cdpEndpoint: selected.wsUrl! })
+        console.log(`Session ${result.id} created (direct CDP). Use with: playwriter -s ${result.id} -e "..."`)
+        console.log(pc.dim('NOTE: Recording unavailable in direct CDP mode.'))
+        return
+      }
+
+      printBrowserTable(directOptions)
+      console.log('\nRun again with --browser <key>.')
+      process.exit(1)
+    }
+
+    // Default mode: extension-based (existing behavior)
     let extensions: ExtensionStatus[] = []
 
     if (isLocal) {
@@ -315,6 +405,7 @@ cli
 
     if (extensions.length === 0) {
       console.error('No connected browsers detected. Click the Playwriter extension icon.')
+      console.error(pc.dim('Tip: Use --direct to connect via Chrome DevTools Protocol instead.'))
       process.exit(1)
     }
 
@@ -327,59 +418,167 @@ cli
       }
     }
 
-    let selectedExtension: ExtensionStatus | null = null
-
-    if (extensions.length === 1) {
-      selectedExtension = extensions[0]
-    } else if (!options.browser) {
-      console.log('Multiple browsers detected:\n')
-      console.log('KEY                      BROWSER  PROFILE')
-      console.log('-----------------------  -------  -------')
-      for (const extension of extensions) {
-        const label = extension.profile?.email || '(not signed in)'
-        const stableKey = extension.stableKey || '-'
-        console.log(`${stableKey.padEnd(23)}  ${(extension.browser || 'Chrome').padEnd(7)}  ${label}`)
-      }
-      console.log('\nRun again with --browser <stableKey>.')
-      process.exit(1)
-    } else {
-      const browserArg = options.browser
-      selectedExtension = extensions.find((extension) => extension.stableKey === browserArg) || null
-      if (!selectedExtension) {
-        console.error(`Browser not found: ${browserArg}`)
+    // Single extension: auto-select (unchanged behavior)
+    if (extensions.length === 1 && !options.browser) {
+      const selectedExtension = extensions[0]
+      try {
+        const serverUrl = await getServerUrl(options.host)
+        const extensionId =
+          selectedExtension.extensionId === 'default'
+            ? null
+            : selectedExtension.stableKey || selectedExtension.extensionId
+        const cwd = process.cwd()
+        const response = await fetch(`${serverUrl}/cli/session/new`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ extensionId, cwd }),
+        })
+        if (!response.ok) {
+          const text = await response.text()
+          console.error(`Error: ${response.status} ${text}`)
+          process.exit(1)
+        }
+        const result = (await response.json()) as { id: string; extensionId: string | null }
+        console.log(`Session ${result.id} created. Use with: playwriter -s ${result.id} -e "..."`)
+      } catch (error: any) {
+        console.error(`Error: ${error.message}`)
         process.exit(1)
       }
+      return
     }
 
-    if (!selectedExtension) {
-      console.error('Unable to determine browser identity.')
-      process.exit(1)
-    }
+    // Multiple extensions: also discover direct CDP instances and show unified table
+    console.log(pc.dim('Discovering additional Chrome instances...'))
+    const directInstances = await discoverChromeInstances()
 
-    try {
-      const serverUrl = await getServerUrl(options.host)
-      const extensionId =
-        selectedExtension.extensionId === 'default'
-          ? null
-          : selectedExtension.stableKey || selectedExtension.extensionId
-      const cwd = process.cwd()
-      const response = await fetch(`${serverUrl}/cli/session/new`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ extensionId, cwd }),
+    const allOptions: BrowserOption[] = [
+      ...extensions.map((ext) => {
+        return {
+          key: ext.stableKey || ext.extensionId,
+          type: 'extension' as const,
+          browser: ext.browser || 'Chrome',
+          profile: ext.profile?.email || '(not signed in)',
+          extensionId: ext.extensionId === 'default' ? null : ext.stableKey || ext.extensionId,
+        }
+      }),
+      ...directInstances.map((instance) => {
+        return instanceToBrowserOption(instance)
+      }),
+    ]
+
+    if (options.browser) {
+      const selected = allOptions.find((opt) => {
+        return opt.key === options.browser
       })
-      if (!response.ok) {
-        const text = await response.text()
-        console.error(`Error: ${response.status} ${text}`)
+      if (!selected) {
+        console.error(`Browser not found: ${options.browser}`)
+        console.error('Available: ' + allOptions.map((opt) => opt.key).join(', '))
         process.exit(1)
       }
-      const result = (await response.json()) as { id: string; extensionId: string | null }
-      console.log(`Session ${result.id} created. Use with: playwriter -s ${result.id} -e "..."`)
-    } catch (error: any) {
-      console.error(`Error: ${error.message}`)
-      process.exit(1)
+
+      try {
+        const serverUrl = await getServerUrl(options.host)
+        if (selected.type === 'direct') {
+          const result = await createDirectSession({ serverUrl, cdpEndpoint: selected.wsUrl! })
+          console.log(`Session ${result.id} created (direct CDP). Use with: playwriter -s ${result.id} -e "..."`)
+          console.log(pc.dim('NOTE: Recording unavailable in direct CDP mode.'))
+        } else {
+          const cwd = process.cwd()
+          const response = await fetch(`${serverUrl}/cli/session/new`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ extensionId: selected.extensionId, cwd }),
+          })
+          if (!response.ok) {
+            const text = await response.text()
+            console.error(`Error: ${response.status} ${text}`)
+            process.exit(1)
+          }
+          const result = (await response.json()) as { id: string }
+          console.log(`Session ${result.id} created. Use with: playwriter -s ${result.id} -e "..."`)
+        }
+      } catch (error: any) {
+        console.error(`Error: ${error.message}`)
+        process.exit(1)
+      }
+      return
     }
+
+    // Show unified table
+    console.log('\nMultiple browsers detected:\n')
+    printBrowserTable(allOptions)
+    console.log('\nRun again with --browser <key>.')
+    process.exit(1)
   })
+
+async function ensureRelayForSessionCreation(isLocal: boolean): Promise<void> {
+  if (isLocal) {
+    await ensureRelayServer({ logger: console, env: cliRelayEnv })
+  }
+}
+
+async function createDirectSession({
+  serverUrl,
+  cdpEndpoint,
+}: {
+  serverUrl: string
+  cdpEndpoint: string
+}): Promise<{ id: string }> {
+  const cwd = process.cwd()
+  const response = await fetch(`${serverUrl}/cli/session/new`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cdpEndpoint, cwd }),
+  })
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`${response.status} ${text}`)
+  }
+  return (await response.json()) as { id: string }
+}
+
+function instanceToBrowserOption(instance: DiscoveredInstance): BrowserOption {
+  return {
+    key: `direct:${instance.port}`,
+    type: 'direct',
+    browser: instance.browser,
+    profile: formatInstanceProfiles(instance),
+    wsUrl: instance.wsUrl,
+  }
+}
+
+function formatInstanceProfiles(instance: DiscoveredInstance): string {
+  if (instance.profiles.length === 0) {
+    return '(unknown)'
+  }
+  return instance.profiles
+    .map((p) => {
+      return p.email ? `${p.name} (${p.email})` : p.name
+    })
+    .join(', ')
+}
+
+function printBrowserTable(options: BrowserOption[]): void {
+  const keyWidth = Math.max(3, ...options.map((opt) => opt.key.length))
+  const typeWidth = Math.max(4, ...options.map((opt) => opt.type.length))
+  const browserWidth = Math.max(7, ...options.map((opt) => opt.browser.length))
+
+  console.log(
+    'KEY'.padEnd(keyWidth) + '  ' + 'TYPE'.padEnd(typeWidth) + '  ' + 'BROWSER'.padEnd(browserWidth) + '  ' + 'PROFILE',
+  )
+  console.log('-'.repeat(keyWidth + typeWidth + browserWidth + 20))
+  for (const opt of options) {
+    console.log(
+      opt.key.padEnd(keyWidth) +
+        '  ' +
+        opt.type.padEnd(typeWidth) +
+        '  ' +
+        opt.browser.padEnd(browserWidth) +
+        '  ' +
+        opt.profile,
+    )
+  }
+}
 
 cli
   .command('session list', 'List all active sessions')
@@ -629,6 +828,37 @@ cli
       server.close()
       process.exit(0)
     })
+  })
+
+cli
+  .command('browser list', 'Discover Chrome/Chromium instances with debugging enabled')
+  .action(async () => {
+    console.log(pc.dim('Scanning for Chrome instances with debugging enabled...\n'))
+    const instances = await discoverChromeInstances()
+
+    if (instances.length === 0) {
+      console.log('No Chrome instances with debugging enabled found.\n')
+      console.log('Enable debugging in one of these ways:')
+      console.log('  1. Open chrome://inspect/#remote-debugging in Chrome')
+      console.log('  2. Launch Chrome with: chrome --remote-debugging-port=9222')
+      return
+    }
+
+    const portWidth = Math.max(4, ...instances.map((i) => String(i.port).length))
+    const browserWidth = Math.max(7, ...instances.map((i) => i.browser.length))
+
+    console.log('PORT'.padEnd(portWidth) + '  ' + 'BROWSER'.padEnd(browserWidth) + '  ' + 'PROFILES')
+    console.log('-'.repeat(portWidth + browserWidth + 30))
+
+    for (const instance of instances) {
+      const profileLabel = formatInstanceProfiles(instance)
+      console.log(
+        String(instance.port).padEnd(portWidth) + '  ' + instance.browser.padEnd(browserWidth) + '  ' + profileLabel,
+      )
+    }
+
+    console.log('')
+    console.log(pc.dim('Use with: playwriter session new --direct'))
   })
 
 cli.command('logfile', 'Print the path to the relay server log file').action(() => {

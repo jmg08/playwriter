@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.0.98
+
+1. **Direct CDP connection mode** — new `--direct` flag on `session new` connects to Chrome's built-in debugging WebSocket without needing the Playwriter extension. Works with any Chromium-based browser (Chrome, Brave, Ghost Browser, Arc, Edge, etc.) that has debugging enabled via `chrome://inspect/#remote-debugging` or `--remote-debugging-port`. Auto-discovers instances via DevToolsActivePort files and port scanning (9222-9229). Recording is unavailable in this mode.
+2. **`playwriter browser list` command** — lists all Chrome/Chromium instances with debugging enabled, showing port, browser name, and profile info.
+3. **MCP direct mode** — set `PLAYWRITER_DIRECT=auto` or `PLAYWRITER_DIRECT=ws://...` env var, or use `playwriter --direct` to start the MCP server in direct CDP mode without a relay server.
+4. **Multi-browser table includes direct instances** — when multiple extensions are connected, `session new` now also discovers and shows direct CDP instances in the unified selection table.
+
+## 0.0.97
+
+1. **Remove low-value managed-browser unit tests** — dropped the temporary browser-config, browser-launch, and package-path unit tests that were mostly asserting implementation details instead of protecting meaningful product behavior.
+
 ## 0.0.96
 
 1. **Document managed-browser recording permissions** — `playwriter browser start` now clearly reports that recording/tab-capture flags are enabled, and the skill docs now explain that `recording.start()` does not require a manual extension click when using the managed browser flow.

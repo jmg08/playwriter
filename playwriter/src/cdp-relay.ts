@@ -1877,10 +1877,36 @@ export async function startPlayWriterCDPRelayServer({
   })
 
   app.post('/cli/session/new', async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { extensionId?: string | null; cwd?: string }
+    const body = (await c.req.json().catch(() => ({}))) as {
+      extensionId?: string | null
+      cwd?: string
+      /** Direct CDP WebSocket URL — bypasses extension, connects straight to Chrome */
+      cdpEndpoint?: string
+    }
     const sessionId = String(nextSessionNumber++)
-    const extensionId = body.extensionId || null
     const cwd = body.cwd
+
+    // Direct CDP mode: skip extension lookup, pass direct WebSocket URL to executor
+    if (body.cdpEndpoint) {
+      const manager = await getExecutorManager()
+      const executor = manager.getExecutor({
+        sessionId,
+        cwd,
+        cdpConfig: { directCdpUrl: body.cdpEndpoint },
+        sessionMetadata: { extensionId: null, browser: null, profile: null },
+      })
+      const metadata = executor.getSessionMetadata()
+      return c.json({
+        id: sessionId,
+        mode: 'direct' as const,
+        extensionId: metadata.extensionId,
+        browser: metadata.browser,
+        profile: metadata.profile,
+      })
+    }
+
+    // Extension mode (existing behavior)
+    const extensionId = body.extensionId || null
     const allowDefault = !extensionId && store.getState().extensions.size === 1
     const conn = getExtensionConnection(extensionId, { allowFallback: allowDefault })
     if (!conn) {
@@ -1902,6 +1928,7 @@ export async function startPlayWriterCDPRelayServer({
     const metadata = executor.getSessionMetadata()
     return c.json({
       id: sessionId,
+      mode: 'extension' as const,
       extensionId: metadata.extensionId,
       browser: metadata.browser,
       profile: metadata.profile,

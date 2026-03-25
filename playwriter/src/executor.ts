@@ -226,6 +226,8 @@ export interface CdpConfig {
   port?: number
   token?: string
   extensionId?: string | null
+  /** Direct CDP WebSocket URL — bypasses relay + extension, connects straight to Chrome */
+  directCdpUrl?: string
 }
 
 export interface SessionMetadata {
@@ -591,19 +593,55 @@ export class PlaywrightExecutor {
     }
   }
 
-  private async ensureConnection(): Promise<{ browser: Browser; page: Page }> {
-    if (this.isConnected && this.browser && this.page) {
-      return { browser: this.browser, page: this.page }
+  private isDirectCdpMode(): boolean {
+    return !!this.cdpConfig.directCdpUrl
+  }
+
+  /**
+   * Connect to Chrome and set up context/page. Shared by ensureConnection and reset.
+   * In direct CDP mode, connects straight to Chrome's WebSocket.
+   * In extension mode, checks extension status then connects via relay.
+   */
+  private async connectToBrowser(): Promise<{ browser: Browser; page: Page; context: BrowserContext }> {
+    if (this.isDirectCdpMode()) {
+      // Direct CDP: connect straight to Chrome, no relay or extension needed
+      const browser = await chromium.connectOverCDP(this.cdpConfig.directCdpUrl!)
+
+      browser.on('disconnected', () => {
+        this.logger.log('Browser disconnected, clearing connection state')
+        this.clearConnectionState()
+      })
+
+      const contexts = browser.contexts()
+      const context = contexts.length > 0 ? contexts[0] : await browser.newContext()
+
+      context.setDefaultTimeout(60000)
+      context.setDefaultNavigationTimeout(10000)
+
+      context.on('page', (page) => {
+        this.setupPageListeners(page)
+      })
+
+      context.pages().forEach((p) => this.setupPageListeners(p))
+
+      // In direct CDP mode, pages are always available (all tabs visible).
+      // Use the first non-closed page, or create one.
+      const pages = context.pages().filter((p) => !p.isClosed())
+      const page = pages.length > 0 ? pages[0] : await context.newPage()
+      this.setupPageListeners(page)
+
+      await this.setDeviceScaleFactorForMacOS(context)
+
+      return { browser, page, context }
     }
 
-    // Check extension status first to provide better error messages
+    // Extension mode: check status first for better error messages
     const extensionStatus = await this.checkExtensionStatus()
     if (!extensionStatus.connected) {
       throw new Error(EXTENSION_NOT_CONNECTED_ERROR)
     }
     this.warnIfExtensionOutdated(extensionStatus.playwriterVersion)
 
-    // Generate a fresh unique URL for each Playwright connection
     const cdpUrl = getCdpUrl(this.cdpConfig)
     const browser = await chromium.connectOverCDP(cdpUrl)
 
@@ -629,6 +667,16 @@ export class PlaywrightExecutor {
     const page = await this.ensurePageForContext({ context, timeout: 10000 })
 
     await this.setDeviceScaleFactorForMacOS(context)
+
+    return { browser, page, context }
+  }
+
+  private async ensureConnection(): Promise<{ browser: Browser; page: Page }> {
+    if (this.isConnected && this.browser && this.page) {
+      return { browser: this.browser, page: this.page }
+    }
+
+    const { browser, page, context } = await this.connectToBrowser()
 
     this.browser = browser
     this.page = page
@@ -679,39 +727,7 @@ export class PlaywrightExecutor {
     this.clearConnectionState()
     this.clearUserState()
 
-    // Check extension status first to provide better error messages
-    const extensionStatus = await this.checkExtensionStatus()
-    if (!extensionStatus.connected) {
-      throw new Error(EXTENSION_NOT_CONNECTED_ERROR)
-    }
-    this.warnIfExtensionOutdated(extensionStatus.playwriterVersion)
-
-    // Generate a fresh unique URL for each Playwright connection
-    const cdpUrl = getCdpUrl(this.cdpConfig)
-    const browser = await chromium.connectOverCDP(cdpUrl)
-
-    browser.on('disconnected', () => {
-      this.logger.log('Browser disconnected, clearing connection state')
-      this.clearConnectionState()
-    })
-
-    const contexts = browser.contexts()
-    const context = contexts.length > 0 ? contexts[0] : await browser.newContext()
-
-    // Action timeout (click, fill, hover, etc.) is longer to tolerate slower
-    // SPA/Turbo navigations and post-click settling on real sites.
-    // Navigation timeout (goto, reload) remains separate.
-    context.setDefaultTimeout(60000)
-    context.setDefaultNavigationTimeout(10000)
-
-    context.on('page', (page) => {
-      this.setupPageListeners(page)
-    })
-
-    context.pages().forEach((p) => this.setupPageListeners(p))
-    const page = await this.ensurePageForContext({ context, timeout: 10000 })
-
-    await this.setDeviceScaleFactorForMacOS(context)
+    const { browser, page, context } = await this.connectToBrowser()
 
     this.browser = browser
     this.page = page
@@ -1227,11 +1243,20 @@ export class PlaywrightExecutor {
   }
 
   // When extension is connected but has no pages, auto-create only if PLAYWRITER_AUTO_ENABLE is set.
+  // In direct CDP mode, always create a page (no extension check needed).
   private async ensurePageForContext(options: { context: BrowserContext; timeout: number }): Promise<Page> {
     const { context, timeout } = options
     const pages = context.pages().filter((p) => !p.isClosed())
     if (pages.length > 0) {
       return pages[0]
+    }
+
+    // Direct CDP mode: always create a new page, no extension involved
+    if (this.isDirectCdpMode()) {
+      const page = await context.newPage()
+      this.setupPageListeners(page)
+      await page.waitForLoadState('domcontentloaded', { timeout }).catch(() => {})
+      return page
     }
 
     const extensionStatus = await this.checkExtensionStatus()
@@ -1307,14 +1332,27 @@ export class ExecutorManager {
     this.logger = options.logger || { log: console.log, error: console.error }
   }
 
-  getExecutor(options: { sessionId: string; cwd?: string; sessionMetadata?: SessionMetadata }): PlaywrightExecutor {
+  getExecutor(options: {
+    sessionId: string
+    cwd?: string
+    sessionMetadata?: SessionMetadata
+    /** Override cdpConfig for this session (e.g. direct CDP connection) */
+    cdpConfig?: CdpConfig
+  }): PlaywrightExecutor {
     const { sessionId, cwd, sessionMetadata } = options
     let executor = this.executors.get(sessionId)
     if (!executor) {
-      const baseConfig = typeof this.cdpConfig === 'function' ? this.cdpConfig(sessionId) : this.cdpConfig
-      const cdpConfig = sessionMetadata?.extensionId
-        ? { ...baseConfig, extensionId: sessionMetadata.extensionId }
-        : baseConfig
+      const cdpConfig = (() => {
+        // Per-session override takes priority (used for direct CDP sessions)
+        if (options.cdpConfig) {
+          return options.cdpConfig
+        }
+        const baseConfig = typeof this.cdpConfig === 'function' ? this.cdpConfig(sessionId) : this.cdpConfig
+        if (sessionMetadata?.extensionId) {
+          return { ...baseConfig, extensionId: sessionMetadata.extensionId }
+        }
+        return baseConfig
+      })()
       executor = new PlaywrightExecutor({
         cdpConfig,
         sessionMetadata,

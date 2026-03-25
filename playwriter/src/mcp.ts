@@ -17,6 +17,7 @@ import dedent from 'string-dedent'
 import { LOG_FILE_PATH, VERSION, parseRelayHost } from './utils.js'
 import { ensureRelayServer, RELAY_PORT } from './relay-client.js'
 import { PlaywrightExecutor, CodeExecutionTimeoutError } from './executor.js'
+import { discoverChromeInstances } from './chrome-discovery.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -87,8 +88,46 @@ async function ensureRelayServerForMcp(): Promise<void> {
   await ensureRelayServer({ logger: mcpLogger })
 }
 
+/**
+ * Resolve direct CDP config from PLAYWRITER_DIRECT env var.
+ * - "auto": discover Chrome instances, use the first one
+ * - "ws://...": use explicit WebSocket endpoint
+ */
+async function getDirectCdpConfig(): Promise<{ directCdpUrl: string } | null> {
+  const directEnv = process.env.PLAYWRITER_DIRECT
+  if (!directEnv) {
+    return null
+  }
+
+  if (directEnv.startsWith('ws://') || directEnv.startsWith('wss://')) {
+    return { directCdpUrl: directEnv }
+  }
+
+  // "auto" or any truthy value: discover Chrome instances
+  const instances = await discoverChromeInstances()
+  if (instances.length === 0) {
+    throw new Error(
+      'PLAYWRITER_DIRECT is set but no Chrome instances with debugging enabled were found. ' +
+        'Enable debugging at chrome://inspect/#remote-debugging or launch with --remote-debugging-port=9222.',
+    )
+  }
+  mcpLog(`Direct CDP: found ${instances.length} instance(s), using ${instances[0].browser} on port ${instances[0].port}`)
+  return { directCdpUrl: instances[0].wsUrl }
+}
+
 async function getOrCreateExecutor(): Promise<PlaywrightExecutor> {
   if (executor) {
+    return executor
+  }
+
+  // Direct CDP mode takes priority over relay/remote
+  const directConfig = await getDirectCdpConfig()
+  if (directConfig) {
+    executor = new PlaywrightExecutor({
+      cdpConfig: directConfig,
+      logger: mcpLogger,
+      cwd: process.cwd(),
+    })
     return executor
   }
 
@@ -194,9 +233,12 @@ server.tool(
   async ({ code, timeout }) => {
     try {
       // Check relay server on every execute to auto-recover from crashes
-      const remote = getRemoteConfig()
-      if (!remote) {
-        await ensureRelayServerForMcp()
+      // (skip in direct CDP mode — no relay involved)
+      if (!process.env.PLAYWRITER_DIRECT) {
+        const remote = getRemoteConfig()
+        if (!remote) {
+          await ensureRelayServerForMcp()
+        }
       }
 
       const exec = await getOrCreateExecutor()
@@ -266,9 +308,12 @@ server.tool(
   async () => {
     try {
       // Check relay server to auto-recover from crashes
-      const remote = getRemoteConfig()
-      if (!remote) {
-        await ensureRelayServerForMcp()
+      // (skip in direct CDP mode — no relay involved)
+      if (!process.env.PLAYWRITER_DIRECT) {
+        const remote = getRemoteConfig()
+        if (!remote) {
+          await ensureRelayServerForMcp()
+        }
       }
 
       const exec = await getOrCreateExecutor()
@@ -291,20 +336,28 @@ server.tool(
   },
 )
 
-export async function startMcp(options: { host?: string; token?: string } = {}) {
+export async function startMcp(options: { host?: string; token?: string; direct?: string } = {}) {
   if (options.host) {
     process.env.PLAYWRITER_HOST = options.host
   }
   if (options.token) {
     process.env.PLAYWRITER_TOKEN = options.token
   }
+  if (options.direct) {
+    process.env.PLAYWRITER_DIRECT = options.direct
+  }
 
-  const remote = getRemoteConfig()
-  if (!remote) {
-    await ensureRelayServerForMcp()
+  // In direct CDP mode, no relay server or remote server needed
+  if (process.env.PLAYWRITER_DIRECT) {
+    mcpLog(`Using direct CDP connection: ${process.env.PLAYWRITER_DIRECT}`)
   } else {
-    mcpLog(`Using remote CDP relay server: ${remote.host}`)
-    await checkRemoteServer(remote)
+    const remote = getRemoteConfig()
+    if (!remote) {
+      await ensureRelayServerForMcp()
+    } else {
+      mcpLog(`Using remote CDP relay server: ${remote.host}`)
+      await checkRemoteServer(remote)
+    }
   }
 
   const transport = new StdioServerTransport()
