@@ -7,7 +7,6 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { flushSync } from 'react-dom'
 import Prism from 'prismjs'
 import 'prismjs/components/prism-jsx'
 import 'prismjs/components/prism-tsx'
@@ -76,9 +75,9 @@ const headingStyleByLevel: Record<HeadingLevel, React.CSSProperties> = {
 }
 
 const tocLineHeightByLevel: Record<HeadingLevel, number> = {
-  1: 1.32,
-  2: 1.32,
-  3: 1.32,
+  1: 1.6,
+  2: 1.6,
+  3: 1.6,
 }
 
 function getTocLevel({ item }: { item: TocItem }): HeadingLevel {
@@ -105,12 +104,16 @@ function prepareTocItems({ items }: { items: TocItem[] }): PreparedTocItem[] {
     const level = getTocLevel({ item })
     ancestorContinuations.length = Math.max(level - 1, 0)
     const isLast = !hasNextTocSibling({ items, index, level })
-    const prefix = `${ancestorContinuations
-      .slice(0, Math.max(level - 1, 0))
-      .map((shouldContinue) => {
-        return shouldContinue ? '│  ' : '   '
-      })
-      .join('')}${isLast ? '└─ ' : '├─ '}`
+
+    // Root items (level 1) get no tree prefix, only nested items do
+    const prefix = level === 1
+      ? ''
+      : `${ancestorContinuations
+          .slice(1, Math.max(level - 1, 0))
+          .map((shouldContinue) => {
+            return shouldContinue ? '│  ' : '   '
+          })
+          .join('')}${isLast ? '└─ ' : '├─ '}`
 
     ancestorContinuations[level - 1] = !isLast
 
@@ -269,14 +272,18 @@ export function TableOfContents({ items, logo }: { items: TocItem[]; logo?: stri
     return result
   }, [preparedItems])
 
-  // Compute which section the active heading belongs to
-  const targetSection = useMemo(() => {
+  // Track which sections are expanded. First section with children starts open.
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(() => {
+    const first = groups.find((g) => {
+      return g.children.length > 0
+    })
+    return first ? new Set([first.parent.href]) : new Set()
+  })
+
+  // Auto-expand the section containing the active heading on scroll
+  useEffect(() => {
     if (!activeId) {
-      // Default: first section with children
-      const first = groups.find((g) => {
-        return g.children.length > 0
-      })
-      return first?.parent.href ?? null
+      return
     }
     const activeHref = `#${activeId}`
     let currentParent: string | null = null
@@ -284,78 +291,47 @@ export function TableOfContents({ items, logo }: { items: TocItem[]; logo?: stri
       if (item.level === 1) {
         currentParent = item.href
       }
-      if (item.href === activeHref) {
-        return currentParent
+      if (item.href === activeHref && currentParent && !expandedSections.has(currentParent)) {
+        setExpandedSections((prev) => {
+          return new Set([...prev, currentParent!])
+        })
+        break
       }
     }
-    return null
-  }, [activeId, preparedItems, groups])
+  }, [activeId, preparedItems]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Expanded section is explicit state, updated via View Transition API
-  const [expandedSection, setExpandedSection] = useState<string | null>(() => {
-    const first = groups.find((g) => {
-      return g.children.length > 0
+  const toggleSection = (href: string) => {
+    setExpandedSections((prev) => {
+      const next = new Set(prev)
+      if (next.has(href)) {
+        next.delete(href)
+      } else {
+        next.add(href)
+      }
+      return next
     })
-    return first?.parent.href ?? null
-  })
-
-  // When target section changes, animate the transition with View Transition API
-  useEffect(() => {
-    if (targetSection === expandedSection) {
-      return
-    }
-    if ('startViewTransition' in document) {
-      document.startViewTransition(() => {
-        flushSync(() => {
-          setExpandedSection(targetSection)
-        })
-      })
-    } else {
-      setExpandedSection(targetSection)
-    }
-  }, [targetSection]) // eslint-disable-line react-hooks/exhaustive-deps
+  }
 
   return (
-    <aside
-      className='fixed top-[80px] hidden lg:block'
-      style={{ left: 'max(1rem, calc((100vw - 550px) / 2 - 280px))', width: 'fit-content', maxWidth: '240px' }}
-    >
+    <aside style={{ width: 'fit-content', maxWidth: '210px' }}>
+
       <nav aria-label='Table of contents'>
-        <a
-          href='/'
-          className='no-underline transition-colors block'
-          style={{
-            fontSize: 'var(--type-toc-size)',
-            fontWeight: 700,
-            lineHeight: 1.32,
-            letterSpacing: 'normal',
-            padding: '4px 0',
-            color: 'var(--text-primary)',
-            fontFamily: 'var(--font-code)',
-            marginBottom: '4px',
-            whiteSpace: 'pre',
-            textTransform: 'lowercase',
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.color = 'var(--text-hover)'
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.color = 'var(--text-primary)'
-          }}
-        >
-          {logo ?? 'index'}
-        </a>
         {groups.map((group, groupIndex) => {
-          const isExpanded = expandedSection === group.parent.href
+          const isExpanded = expandedSections.has(group.parent.href)
           const hasChildren = group.children.length > 0
           return (
             <div key={group.parent.href}>
-              <TocLink
-                item={group.parent}
-                isActive={`#${activeId}` === group.parent.href}
-                activeId={activeId}
-                chevron={hasChildren ? { expanded: isExpanded } : undefined}
-              />
+              <div
+                onClick={hasChildren ? () => { toggleSection(group.parent.href) } : undefined}
+                style={{ cursor: hasChildren ? 'pointer' : undefined }}
+              >
+                <TocLink
+                  item={group.parent}
+                  isActive={`#${activeId}` === group.parent.href}
+                  activeId={activeId}
+                  chevron={hasChildren ? { expanded: isExpanded } : undefined}
+                />
+              </div>
               {hasChildren && isExpanded && (
                 <div
                   className='toc-children-container'
@@ -1081,35 +1057,381 @@ export function ComparisonTable({
 }
 
 /* =========================================================================
-   Page shell — wraps content with layout, TOC, back button, animations
+   Tab bar — Mintlify/Notion-style top navigation tabs
+   Active tab has 1.5px bottom indicator + faux bold via text-shadow.
    ========================================================================= */
+
+export type TabItem = {
+  label: string
+  href: string
+}
+
+/* =========================================================================
+   Sidebar banner — Seline-style CTA card for the right gutter.
+   Tinted background, short text, full-width button, optional corner image.
+   ========================================================================= */
+
+export function SidebarBanner({
+  text,
+  buttonLabel,
+  buttonHref,
+  imageUrl,
+}: {
+  text: React.ReactNode
+  buttonLabel: string
+  buttonHref: string
+  imageUrl?: string
+}) {
+  return (
+    <div
+      style={{
+        position: 'relative',
+        backgroundColor: 'var(--code-bg)',
+        borderRadius: '10px',
+        padding: '10px',
+        fontSize: '13px',
+        fontWeight: 450,
+        lineHeight: 1.45,
+        color: 'var(--text-tree-label)',
+        overflow: 'visible',
+      }}
+    >
+      {text}
+      <a
+        href={buttonHref}
+        className='no-underline'
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          width: '100%',
+          height: '32px',
+          marginTop: '8px',
+          borderRadius: '8px',
+          fontSize: '13px',
+          fontWeight: 500,
+          backgroundColor: 'var(--text-primary)',
+          color: 'var(--bg)',
+          textDecoration: 'none',
+          position: 'relative',
+          zIndex: 2,
+          transition: 'opacity 0.15s ease',
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.opacity = '0.85'
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.opacity = '1'
+        }}
+      >
+        {buttonLabel}
+      </a>
+      {imageUrl && (
+        <img
+          src={imageUrl}
+          alt=''
+          width={144}
+          height={144}
+          style={{
+            position: 'absolute',
+            zIndex: 1,
+            top: '-32px',
+            right: '-32px',
+            height: '120px',
+            width: 'auto',
+            pointerEvents: 'none',
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+function TabLink({ tab, isActive }: { tab: TabItem; isActive: boolean }) {
+  const isExternal = tab.href.startsWith('http')
+  return (
+    <a
+      href={tab.href}
+      {...(isExternal ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+      className='no-underline'
+      style={{
+        position: 'relative',
+        display: 'flex',
+        alignItems: 'center',
+        fontSize: '13px',
+        fontWeight: 500,
+        fontFamily: 'var(--font-primary)',
+        color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+        textShadow: isActive ? '-0.2px 0 0 currentColor, 0.2px 0 0 currentColor' : 'none',
+        textDecoration: 'none',
+        textTransform: 'lowercase',
+        transition: 'color 0.15s ease',
+        whiteSpace: 'nowrap',
+      }}
+      onMouseEnter={(e) => {
+        if (!isActive) {
+          e.currentTarget.style.color = 'var(--text-primary)'
+          const indicator = e.currentTarget.querySelector<HTMLElement>('[data-tab-indicator]')
+          if (indicator) {
+            indicator.style.backgroundColor = 'var(--text-tertiary)'
+          }
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!isActive) {
+          e.currentTarget.style.color = 'var(--text-secondary)'
+          const indicator = e.currentTarget.querySelector<HTMLElement>('[data-tab-indicator]')
+          if (indicator) {
+            indicator.style.backgroundColor = 'transparent'
+          }
+        }
+      }}
+    >
+      {tab.label}
+      <div
+        data-tab-indicator
+        style={{
+          position: 'absolute',
+          bottom: 0,
+          left: 0,
+          width: '100%',
+          height: '1.5px',
+          backgroundColor: isActive ? 'var(--text-primary)' : 'transparent',
+          borderRadius: '1px',
+          transition: 'background-color 0.15s ease',
+        }}
+      />
+    </a>
+  )
+}
+
+/* =========================================================================
+   Page shell — CSS grid layout with named areas.
+
+   Desktop (lg+):
+     "tabs    tabs   ."
+     "toc     content ."
+
+   Mobile:
+     "tabs"
+     "content"
+
+   The grid centers the content column. The TOC column is sticky.
+   ========================================================================= */
+
+export type HeaderLink = {
+  href: string
+  label: string
+  icon: React.ReactNode
+}
 
 export function EditorialPage({
   toc,
   logo,
+  tabs,
+  activeTab,
+  sidebar,
+  headerLinks,
   children,
 }: {
   toc: TocItem[]
   logo?: string
+  tabs?: TabItem[]
+  activeTab?: string
+  sidebar?: React.ReactNode
+  headerLinks?: HeaderLink[]
   children: React.ReactNode
 }) {
+  const hasTabBar = tabs && tabs.length > 0
+
   return (
     <div
-      className='editorial-page relative min-h-screen overflow-x-hidden'
+      className='editorial-page'
       style={{
         background: 'var(--bg)',
         color: 'var(--text-primary)',
         fontFamily: 'var(--font-primary)',
         WebkitFontSmoothing: 'antialiased',
         textRendering: 'optimizeLegibility',
+        minHeight: '100vh',
       }}
     >
-      <TableOfContents items={toc} logo={logo} />
+      {/* Header + Tab bar: full-width, sticky at top */}
+      <div
+        className='editorial-header'
+        style={{
+          position: 'sticky',
+          top: 0,
+          zIndex: 100,
+          background: 'var(--bg)',
+        }}
+      >
+        {/* Top row: logo + right links */}
+        <div
+          style={{
+              maxWidth: '1040px',
+              marginLeft: 'auto',
+              marginRight: 'auto',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              height: '44px',
+          }}
+        >
+          <a
+            href='/'
+            className='no-underline'
+            style={{
+              color: 'var(--text-primary)',
+              textDecoration: 'none',
+              display: 'flex',
+              alignItems: 'center',
+            }}
+          >
+            {logo ? (
+              <div
+                role='img'
+                aria-label='playwriter'
+                style={{
+                  height: '30px',
+                  /* aspect ratio from SVG viewBox: 730/201 ≈ 3.63 */
+                  aspectRatio: '730 / 201',
+                  backgroundColor: 'var(--logo-color)',
+                  maskImage: `url(${logo})`,
+                  maskSize: 'contain',
+                  maskRepeat: 'no-repeat',
+                  WebkitMaskImage: `url(${logo})`,
+                  WebkitMaskSize: 'contain',
+                  WebkitMaskRepeat: 'no-repeat',
+                }}
+              />
+            ) : (
+              <span style={{
+                fontSize: '15px',
+                fontWeight: 700,
+                fontFamily: 'var(--font-code)',
+                textTransform: 'lowercase',
+                letterSpacing: '-0.01em',
+              }}>
+                index
+              </span>
+            )}
+          </a>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+            {/* Icon links */}
+          {headerLinks && headerLinks.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              {headerLinks.map((link) => {
+                return (
+                  <a
+                    key={link.href}
+                    href={link.href}
+                    target='_blank'
+                    rel='noopener noreferrer'
+                    aria-label={link.label}
+                    className='no-underline'
+                    style={{
+                      color: 'var(--text-secondary)',
+                      transition: 'color 0.15s ease',
+                      display: 'flex',
+                      alignItems: 'center',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.color = 'var(--text-primary)'
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.color = 'var(--text-secondary)'
+                    }}
+                  >
+                    {link.icon}
+                  </a>
+                )
+              })}
+            </div>
+          )}
+          </div>
+        </div>
 
-      <div className='mx-auto' style={{ width: '550px', maxWidth: 'calc(100% - 2rem)', padding: '0 1rem 6rem' }}>
+        {/* Tab row */}
+        {hasTabBar && (
+          <div
+            className='editorial-tab-bar'
+            style={{ borderBottom: '1px solid var(--page-border)' }}
+          >
+            <div
+              style={{
+                maxWidth: '1040px',
+                marginLeft: 'auto',
+                marginRight: 'auto',
+                display: 'flex',
+                alignItems: 'stretch',
+                gap: '24px',
+                height: '36px',
+              }}
+            >
+              {tabs.map((tab) => {
+                return <TabLink key={tab.href} tab={tab} isActive={tab.href === (activeTab ?? tabs[0].href)} />
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 3-column grid centered via max-width + margin auto.
+          Columns: TOC (240px) | gap (60px) | content (550px). */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '210px 50px 520px 50px 210px',
+          maxWidth: '1040px',
+          marginLeft: 'auto',
+          marginRight: 'auto',
+        }}
+      >
+
+      {/* TOC sidebar: sticky within its grid cell */}
+      <div
+        className='hidden lg:block'
+        style={{ gridColumn: '1', paddingTop: '56px' }}
+      >
+        <div
+          style={{
+            position: 'sticky',
+            top: hasTabBar ? '81px' : '0px',
+            paddingTop: '24px',
+          }}
+        >
+          <TableOfContents items={toc} logo={logo} />
+        </div>
+      </div>
+
+      {/* Content column */}
+      <div
+        style={{
+          gridColumn: '3',
+          padding: '0 0 6rem',
+          maxWidth: '100%',
+        }}
+      >
         <div style={{ height: '80px' }} />
-
         <article className='editorial-article flex flex-col gap-[32px]'>{children}</article>
+      </div>
+
+      {/* Right sidebar: CTA banner, sticky */}
+      <div
+        className='hidden lg:block'
+        style={{ gridColumn: '5' }}
+      >
+        <div
+          style={{
+            position: 'sticky',
+            top: hasTabBar ? '56px' : '12px',
+            paddingTop: '68px',
+          }}
+        >
+          {sidebar}
+        </div>
+      </div>
       </div>
     </div>
   )
