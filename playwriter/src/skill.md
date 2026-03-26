@@ -800,6 +800,8 @@ await editor.edit({ url: matches[0].url, oldString: 'DEBUG = false', newString: 
 
 **screenshotWithAccessibilityLabels** - take a screenshot with Vimium-style visual labels overlaid on interactive elements. Shows labels, captures screenshot, then removes labels. The image and accessibility snapshot are automatically included in the response. Can be called multiple times to capture multiple screenshots. Use a timeout of **20 seconds** for complex pages.
 
+This is only for **finding interactive elements** on the page. To share a screenshot with the user or save an image, use `page.screenshot()` + `resizeImage()` instead (see "taking screenshots" section below).
+
 Prefer this for pages with grids, image galleries, maps, or complex visual layouts where spatial position matters. For simple text-heavy pages, `snapshot` with search is faster and uses fewer tokens.
 
 ```js
