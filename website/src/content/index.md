@@ -1,13 +1,12 @@
 <Aside>
 
 If you like **Playwriter** please
-[Star on GitHub](https://github.com/remorses/playwriter). It helps give more visibility to the project!
+[star on GitHub](https://github.com/remorses/playwriter). It helps give more visibility to the project!
 
 </Aside>
 
 A Chrome extension and CLI that let your agents control **your actual browser** — with
 logins, extensions, and cookies already there. No headless instance, no bot detection, no extra memory.
-[Star on GitHub](https://github.com/remorses/playwriter).
 
 <Bleed>
 <PixelatedImage
