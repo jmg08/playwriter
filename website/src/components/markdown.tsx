@@ -451,9 +451,9 @@ export function TableOfContents({ items, logo }: { items: TocItem[]; logo?: stri
   const isSearchActive = searchState.matchedHrefs !== null
 
   return (
-    <aside style={{ width: 'fit-content', maxWidth: 'var(--grid-toc-width)' }}>
-      {/* Search input with F hotkey badge */}
-      <div style={{ paddingBottom: '8px', display: 'flex', alignItems: 'center', position: 'relative' }}>
+    <aside style={{ width: 'fit-content', maxWidth: 'var(--grid-toc-width)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      {/* Search input with F hotkey badge — stays pinned at top */}
+      <div style={{ paddingBottom: '12px', display: 'flex', alignItems: 'center', position: 'relative', flexShrink: 0 }}>
         <input
           ref={searchInputRef}
           type='text'
@@ -463,7 +463,7 @@ export function TableOfContents({ items, logo }: { items: TocItem[]; logo?: stri
           placeholder='search...'
           style={{
             width: '100%',
-            padding: '4px 24px 4px 8px',
+            padding: '2px 24px 2px 8px',
             fontSize: 'var(--type-toc-size)',
             fontFamily: 'var(--font-primary)',
             fontWeight: WEIGHT.prose,
@@ -509,7 +509,7 @@ export function TableOfContents({ items, logo }: { items: TocItem[]; logo?: stri
         )}
       </div>
 
-      <nav aria-label='Table of contents'>
+      <nav aria-label='Table of contents' style={{ overflowY: 'auto', minHeight: 0, paddingRight: '4px' }}>
         {groups.map((group, groupIndex) => {
           const isExpanded = expandedSections.has(group.parent.href)
             || (isSearchActive && Boolean(searchState.expandOverride?.has(group.parent.href)))
@@ -1574,6 +1574,9 @@ export function EditorialPage({
             style={{
               position: 'sticky',
               top: hasTabBar ? 'var(--sticky-top)' : '0px',
+              maxHeight: hasTabBar ? 'calc(100vh - var(--sticky-top))' : '100vh',
+              display: 'flex',
+              flexDirection: 'column',
             }}
           >
             <TableOfContents items={toc} logo={logo} />
