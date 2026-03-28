@@ -8,6 +8,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { buildSearchEntries, createTocDb, searchToc, type SearchState } from './search.js'
 import Prism from 'prismjs'
 import 'prismjs/components/prism-jsx'
 import 'prismjs/components/prism-tsx'
@@ -152,7 +153,7 @@ function prepareTocItems({ items }: { items: TocItem[] }): PreparedTocItem[] {
  *  updates it and notifies React via the subscribe callback. Server snapshot
  *  returns fallbackId to avoid hydration mismatch. Hash is read inside subscribe
  *  (not during render) to keep render pure. All callbacks are stable via useCallback. */
-function useActiveTocId({ fallbackId }: { fallbackId: string }) {
+function useActiveTocId({ fallbackId, scrollLockRef }: { fallbackId: string; scrollLockRef: React.RefObject<boolean> }) {
   const activeRef = useRef(fallbackId)
 
   const subscribe = useCallback((onStoreChange: () => void) => {
@@ -174,6 +175,12 @@ function useActiveTocId({ fallbackId }: { fallbackId: string }) {
 
     const observer = new IntersectionObserver(
       (entries) => {
+        /* Skip observer updates during programmatic smooth scroll to prevent
+           activeId from bouncing through intermediate headings. The lock is
+           set before scrollIntoView and released on scrollend. */
+        if (scrollLockRef.current) {
+          return
+        }
         const visible: string[] = []
         entries.forEach((entry) => {
           if (entry.isIntersecting && entry.target.id) {
@@ -230,18 +237,30 @@ function TocLink({
   isActive,
   activeId,
   chevron,
+  dimmed,
+  isHighlighted,
+  linkRef,
 }: {
   item: PreparedTocItem
   isActive: boolean
   activeId: string
   chevron?: { expanded: boolean }
+  /** Search: dim non-matching items to opacity 0.3 */
+  dimmed?: boolean
+  /** Search: arrow-key highlighted item */
+  isHighlighted?: boolean
+  linkRef?: React.Ref<HTMLAnchorElement>
 }) {
-  const defaultColor = isActive ? 'var(--text-primary)' : 'var(--text-tree-label)'
-  const defaultPrefixColor = isActive ? 'var(--text-secondary)' : 'var(--text-tertiary)'
+  const effectiveActive = isActive && !dimmed
+  const defaultColor = effectiveActive ? 'var(--text-primary)' : dimmed ? 'var(--text-tertiary)' : 'var(--text-tree-label)'
+  const defaultPrefixColor = effectiveActive ? 'var(--text-secondary)' : 'var(--text-tertiary)'
+  const bg = isHighlighted ? 'var(--code-bg)' : effectiveActive ? 'var(--code-bg)' : 'transparent'
   return (
     <a
+      ref={linkRef}
       href={item.href}
       className='block no-underline'
+      tabIndex={dimmed ? -1 : 0}
       style={{
         display: 'flex',
         alignItems: 'flex-start',
@@ -252,20 +271,21 @@ function TocLink({
         padding: '2px 8px',
         color: defaultColor,
         fontFamily: 'var(--font-primary)',
-        transition: 'color 0.15s ease, background-color 0.15s ease',
+        transition: 'color 0.15s ease, background-color 0.15s ease, opacity 0.15s ease',
         borderRadius: '6px',
-        background: isActive ? 'var(--code-bg)' : 'transparent',
+        background: bg,
         textTransform: 'lowercase',
+        opacity: dimmed ? 0.3 : 1,
       }}
       onMouseEnter={(e) => {
-        if (!isActive) {
+        if (!effectiveActive && !dimmed) {
           e.currentTarget.style.color = 'var(--text-primary)'
           e.currentTarget.style.background = 'var(--code-bg)'
         }
       }}
       onMouseLeave={(e) => {
         e.currentTarget.style.color = defaultColor
-        e.currentTarget.style.background = isActive ? 'var(--code-bg)' : 'transparent'
+        e.currentTarget.style.background = bg
       }}
     >
       <span
@@ -283,7 +303,8 @@ function TocLink({
 export function TableOfContents({ items, logo }: { items: TocItem[]; logo?: string }) {
   const firstHref = items[0]?.href ?? ''
   const fallbackId = firstHref.startsWith('#') ? firstHref.slice(1) : firstHref
-  const activeId = useActiveTocId({ fallbackId })
+  const scrollLockRef = useRef(false)
+  const activeId = useActiveTocId({ fallbackId, scrollLockRef })
 
   const preparedItems = useMemo(() => {
     return prepareTocItems({ items })
@@ -342,13 +363,159 @@ export function TableOfContents({ items, logo }: { items: TocItem[]; logo?: stri
     })
   }
 
+  // --- Search state ---
+  const [query, setQuery] = useState('')
+  const [highlightedIndex, setHighlightedIndex] = useState(0)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const highlightedRef = useRef<HTMLAnchorElement>(null)
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined)
+
+  // Build flat search entries and Orama DB once
+  const { entries, db } = useMemo(() => {
+    const entries = buildSearchEntries({ items })
+    const db = createTocDb({ entries })
+    return { entries, db }
+  }, [items])
+
+  const [searchState, setSearchState] = useState<SearchState>({
+    matchedHrefs: null,
+    expandOverride: null,
+    dimmedHrefs: null,
+    focusableHrefs: null,
+  })
+
+  const handleQueryChange = useCallback((value: string) => {
+    setQuery(value)
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current)
+    }
+    debounceRef.current = setTimeout(() => {
+      const state = searchToc({ db, query: value, entries })
+      setSearchState(state)
+      setHighlightedIndex(0)
+    }, 80)
+  }, [db, entries])
+
+  // Scroll highlighted item into view (only when search is active)
+  useEffect(() => {
+    if (!searchState.focusableHrefs) {
+      return
+    }
+    highlightedRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [highlightedIndex, searchState.focusableHrefs])
+
+  // Global F hotkey to focus search input
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'f' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const tag = (e.target as HTMLElement).tagName
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable) {
+          return
+        }
+        e.preventDefault()
+        searchInputRef.current?.focus()
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => { document.removeEventListener('keydown', onKeyDown) }
+  }, [])
+
+  const handleSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      handleQueryChange('')
+      searchInputRef.current?.blur()
+      return
+    }
+    const focusable = searchState.focusableHrefs
+    if (!focusable || focusable.length === 0) {
+      return
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setHighlightedIndex((prev) => { return Math.min(prev + 1, focusable.length - 1) })
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setHighlightedIndex((prev) => { return Math.max(prev - 1, 0) })
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      const href = focusable[highlightedIndex]
+      if (href) {
+        handleQueryChange('')
+        searchInputRef.current?.blur()
+        window.location.hash = href
+      }
+    }
+  }, [searchState.focusableHrefs, highlightedIndex, handleQueryChange])
+
+  const isSearchActive = searchState.matchedHrefs !== null
+
   return (
     <aside style={{ width: 'fit-content', maxWidth: 'var(--grid-toc-width)' }}>
+      {/* Search input with F hotkey badge */}
+      <div style={{ paddingBottom: '8px', display: 'flex', alignItems: 'center', position: 'relative' }}>
+        <input
+          ref={searchInputRef}
+          type='text'
+          value={query}
+          onChange={(e) => { handleQueryChange(e.target.value) }}
+          onKeyDown={handleSearchKeyDown}
+          placeholder='search...'
+          style={{
+            width: '100%',
+            padding: '4px 24px 4px 8px',
+            fontSize: 'var(--type-toc-size)',
+            fontFamily: 'var(--font-primary)',
+            fontWeight: WEIGHT.prose,
+            color: 'var(--text-primary)',
+            background: 'transparent',
+            border: '1px solid var(--page-border)',
+            borderRadius: '6px',
+            outline: 'none',
+            textTransform: 'lowercase',
+            letterSpacing: 'normal',
+            lineHeight: LINE_HEIGHT.prose,
+            transition: 'border-color 0.15s ease',
+            boxSizing: 'border-box',
+          }}
+          onFocus={(e) => {
+            e.currentTarget.style.borderColor = 'var(--text-tertiary)'
+          }}
+          onBlur={(e) => {
+            e.currentTarget.style.borderColor = 'var(--page-border)'
+          }}
+        />
+        {/* Hotkey badge — hidden when input has text */}
+        {!query && (
+          <span
+            aria-hidden='true'
+            style={{
+              position: 'absolute',
+              right: '6px',
+              fontFamily: 'var(--font-code)',
+              fontSize: '10px',
+              fontWeight: WEIGHT.regular,
+              color: 'var(--text-secondary)',
+              border: '1px solid var(--text-tertiary)',
+              borderRadius: '4px',
+              padding: '0px 4px',
+              lineHeight: '16px',
+              pointerEvents: 'none',
+              textTransform: 'uppercase',
+            }}
+          >
+            F
+          </span>
+        )}
+      </div>
 
       <nav aria-label='Table of contents'>
         {groups.map((group, groupIndex) => {
           const isExpanded = expandedSections.has(group.parent.href)
+            || (isSearchActive && Boolean(searchState.expandOverride?.has(group.parent.href)))
           const hasChildren = group.children.length > 0
+          const parentDimmed = isSearchActive && searchState.dimmedHrefs?.has(group.parent.href)
+          const parentHighlightedHref = isSearchActive ? searchState.focusableHrefs?.[highlightedIndex] : undefined
           return (
             <div key={group.parent.href}>
               <div
@@ -360,6 +527,9 @@ export function TableOfContents({ items, logo }: { items: TocItem[]; logo?: stri
                   isActive={`#${activeId}` === group.parent.href}
                   activeId={activeId}
                   chevron={hasChildren ? { expanded: isExpanded } : undefined}
+                  dimmed={parentDimmed || false}
+                  isHighlighted={parentHighlightedHref === group.parent.href}
+                  linkRef={parentHighlightedHref === group.parent.href ? highlightedRef : undefined}
                 />
               </div>
               {hasChildren && isExpanded && (
@@ -370,12 +540,17 @@ export function TableOfContents({ items, logo }: { items: TocItem[]; logo?: stri
                   }}
                 >
                   {group.children.map((child) => {
+                    const childDimmed = isSearchActive && searchState.dimmedHrefs?.has(child.href)
+                    const childIsHighlighted = parentHighlightedHref === child.href
                     return (
                       <TocLink
                         key={child.href}
                         item={child}
                         isActive={`#${activeId}` === child.href}
                         activeId={activeId}
+                        dimmed={childDimmed || false}
+                        isHighlighted={childIsHighlighted}
+                        linkRef={childIsHighlighted ? highlightedRef : undefined}
                       />
                     )
                   })}
