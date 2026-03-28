@@ -28,6 +28,6 @@
     "mcp-extension": "workspace:^"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["*"]
+    "neverBuiltDependencies": []
   }
 }
