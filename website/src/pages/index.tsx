@@ -1,8 +1,11 @@
-'use client'
 /*
  * Playwriter editorial page — rendered from MDX via safe-mdx.
  * Content lives in website/src/content/index.mdx.
  * Components imported from website/src/components/markdown.tsx.
+ *
+ * This is a SERVER component (no 'use client'). MDX parsing and image
+ * processing happen on the server so we can access the filesystem to
+ * auto-detect image dimensions and generate pixelated placeholders.
  *
  * Section-based rendering: the mdast tree is split at ## headings into
  * sections. Each section becomes a CSS subgrid row. <Aside> components
@@ -11,10 +14,11 @@
  */
 
 import React, { type ReactNode, Fragment } from 'react'
-import type { Root, Heading, RootContent } from 'mdast'
+import type { Root, Heading, RootContent, Image } from 'mdast'
 import { SafeMdxRenderer } from 'safe-mdx'
 import { mdxParse } from 'safe-mdx/parse'
 import type { MyRootContent } from 'safe-mdx'
+import path from 'node:path'
 import {
   EditorialPage,
   Aside,
@@ -32,13 +36,13 @@ import {
   List,
   OL,
   Li,
-  flattenTocTree,
   type TabItem,
   type HeaderLink,
   type HeadingLevel,
   type EditorialSection,
 } from '../components/markdown.js'
-import { slugify, extractText, generateTocTree } from '../components/toc-tree.js'
+import { slugify, extractText, generateTocTree, flattenTocTree } from '../components/toc-tree.js'
+import { buildImageManifest } from '../lib/image-cache.js'
 import mdxContent from '../content/index.mdx?raw'
 
 const tabItems = [
@@ -108,83 +112,124 @@ function groupBySections(root: Root): MdastSection[] {
   return sections
 }
 
+/* Parse MDX at module level (sync, no fs needed) */
 const mdast = mdxParse(mdxContent)
 
-/* Extract <Hero> nodes from the mdast before TOC/section processing.
-   Hero nodes are rendered above the 3-column grid in EditorialPage. */
-const heroNodes = (mdast as Root).children.filter(isHeroNode)
-const contentChildren = (mdast as Root).children.filter((node) => {
-  return !isHeroNode(node)
-})
-const contentMdast: Root = { type: 'root', children: contentChildren }
+/* Resolve directories relative to this file.
+ * import.meta.dirname is the directory of this source file (website/src/pages/).
+ * Public dir is website/public/, cache dir is website/.cache/images/. */
+const publicDir = path.resolve(import.meta.dirname, '../../public')
+const cacheDir = path.resolve(import.meta.dirname, '../../.cache/images')
 
-const tocTree = generateTocTree(contentMdast)
-const tocItems = flattenTocTree({ roots: tocTree })
-const mdastSections = groupBySections(contentMdast)
+export async function IndexPage() {
+  /* Build image manifest — reads/generates cached placeholders + dimensions */
+  const imageManifest = await buildImageManifest({
+    mdast: mdast as Root,
+    publicDir,
+    cacheDir,
+  })
 
-const mdxComponents = {
-  p: P,
-  a: A,
-  code: Code,
-  ul: List,
-  ol: OL,
-  li: Li,
-  Caption,
-  ComparisonTable,
-  PixelatedImage,
-  Bleed,
-  Aside,
-  FullWidth,
-  Hero,
-}
+  /* Extract <Hero> nodes from the mdast before TOC/section processing.
+     Hero nodes are rendered above the 3-column grid in EditorialPage. */
+  const heroNodes = (mdast as Root).children.filter(isHeroNode)
+  const contentChildren = (mdast as Root).children.filter((node) => {
+    return !isHeroNode(node)
+  })
+  const contentMdast: Root = { type: 'root', children: contentChildren }
 
-function renderNode(node: MyRootContent, transform: (node: MyRootContent) => ReactNode): ReactNode | undefined {
-  /* Headings: map markdown ## (depth 2) to editorial level 1, etc.
-     Render children individually to avoid wrapping in <P> component. */
-  if (node.type === 'heading') {
-    const heading = node as Heading
-    const text = extractText(heading.children)
-    const id = slugify(text)
-    const level = Math.min(heading.depth - 1, 3) as HeadingLevel
+  const tocTree = generateTocTree(contentMdast)
+  const tocItems = flattenTocTree({ roots: tocTree })
+  const mdastSections = groupBySections(contentMdast)
+
+  /** Wrapper that injects placeholder + dimensions from the image manifest.
+   *  Safe-mdx calls this with the props extracted from the MDX JSX attributes. */
+  function PixelatedImageWithPlaceholder(props: { src: string; alt: string; width?: number; height?: number; className?: string }) {
+    const data = imageManifest[props.src]
     return (
-      <SectionHeading key={id} id={id} level={level}>
-        {heading.children.map((child, i) => {
-          return <Fragment key={i}>{transform(child as MyRootContent)}</Fragment>
-        })}
-      </SectionHeading>
+      <PixelatedImage
+        src={props.src}
+        alt={props.alt}
+        width={data?.width ?? (props.width || 0)}
+        height={data?.height ?? (props.height || 0)}
+        placeholder={data?.placeholder}
+        className={props.className || ''}
+      />
     )
   }
 
-  /* Code blocks: use our CodeBlock with Prism highlighting */
-  if (node.type === 'code') {
-    const codeNode = node as { lang?: string; value: string; meta?: string }
-    const lang = codeNode.lang || 'bash'
-    const isDiagram = lang === 'diagram'
+  const mdxComponents = {
+    p: P,
+    a: A,
+    code: Code,
+    ul: List,
+    ol: OL,
+    li: Li,
+    Caption,
+    ComparisonTable,
+    PixelatedImage: PixelatedImageWithPlaceholder,
+    Bleed,
+    Aside,
+    FullWidth,
+    Hero,
+  }
+
+  function renderNode(node: MyRootContent, transform: (node: MyRootContent) => ReactNode): ReactNode | undefined {
+    /* Markdown images ![alt](url): convert to PixelatedImage with placeholder */
+    if (node.type === 'image') {
+      const imgNode = node as Image
+      return (
+        <PixelatedImageWithPlaceholder
+          src={imgNode.url}
+          alt={imgNode.alt || ''}
+        />
+      )
+    }
+
+    /* Headings: map markdown ## (depth 2) to editorial level 1, etc.
+       Render children individually to avoid wrapping in <P> component. */
+    if (node.type === 'heading') {
+      const heading = node as Heading
+      const text = extractText(heading.children)
+      const id = slugify(text)
+      const level = Math.min(heading.depth - 1, 3) as HeadingLevel
+      return (
+        <SectionHeading key={id} id={id} level={level}>
+          {heading.children.map((child, i) => {
+            return <Fragment key={i}>{transform(child as MyRootContent)}</Fragment>
+          })}
+        </SectionHeading>
+      )
+    }
+
+    /* Code blocks: use our CodeBlock with Prism highlighting */
+    if (node.type === 'code') {
+      const codeNode = node as { lang?: string; value: string; meta?: string }
+      const lang = codeNode.lang || 'bash'
+      const isDiagram = lang === 'diagram'
+      return (
+        <CodeBlock lang={lang} lineHeight={isDiagram ? '1.3' : '1.85'} showLineNumbers={!isDiagram}>
+          {codeNode.value}
+        </CodeBlock>
+      )
+    }
+
+    return undefined
+  }
+
+  /** Render a list of mdast nodes into a React fragment using SafeMdxRenderer.
+   *  Wraps the nodes in a synthetic root so safe-mdx can process them. */
+  function RenderNodes({ nodes }: { nodes: RootContent[] }) {
+    const syntheticRoot: Root = { type: 'root', children: nodes }
     return (
-      <CodeBlock lang={lang} lineHeight={isDiagram ? '1.3' : '1.85'} showLineNumbers={!isDiagram}>
-        {codeNode.value}
-      </CodeBlock>
+      <SafeMdxRenderer
+        markdown={mdxContent}
+        mdast={syntheticRoot as MyRootContent}
+        components={mdxComponents}
+        renderNode={renderNode}
+      />
     )
   }
 
-  return undefined
-}
-
-/** Render a list of mdast nodes into a React fragment using SafeMdxRenderer.
- *  Wraps the nodes in a synthetic root so safe-mdx can process them. */
-function RenderNodes({ nodes }: { nodes: RootContent[] }) {
-  const syntheticRoot: Root = { type: 'root', children: nodes }
-  return (
-    <SafeMdxRenderer
-      markdown={mdxContent}
-      mdast={syntheticRoot as MyRootContent}
-      components={mdxComponents}
-      renderNode={renderNode}
-    />
-  )
-}
-
-export function IndexPage() {
   const sections: EditorialSection[] = mdastSections.map((section) => {
     const aside = section.asideNodes.length > 0 ? <RenderNodes nodes={section.asideNodes} /> : undefined
     return {

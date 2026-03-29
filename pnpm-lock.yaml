@@ -427,6 +427,9 @@ importers:
       '@types/prismjs':
         specifier: ^1.26.6
         version: 1.26.6
+      image-size:
+        specifier: ^2.0.2
+        version: 2.0.2
       prismjs:
         specifier: ^1.30.0
         version: 1.30.0
@@ -475,7 +478,7 @@ importers:
         version: 6.0.3(typescript@5.9.3)(vite@8.0.3(@types/node@25.0.3)(esbuild@0.27.4)(jiti@2.6.1)(tsx@4.20.6)(yaml@2.6.0))
       vitest:
         specifier: ^4.0.16
-        version: 4.0.16(@opentelemetry/api@1.9.0)(@types/node@25.0.3)(@vitest/ui@4.0.8(vitest@4.0.8))(jiti@2.6.1)(jsdom@27.2.0(bufferutil@4.0.9))(lightningcss@1.32.0)(tsx@4.20.6)(yaml@2.6.0)
+        version: 4.0.16(@opentelemetry/api@1.9.0)(@types/node@25.0.3)(@vitest/ui@4.0.8)(jiti@2.6.1)(jsdom@27.2.0(bufferutil@4.0.9))(lightningcss@1.32.0)(tsx@4.20.6)(yaml@2.6.0)
 
 packages:
 
@@ -12462,7 +12465,7 @@ snapshots:
     optionalDependencies:
       vite: 8.0.3(@types/node@25.0.3)(esbuild@0.27.4)(jiti@2.6.1)(tsx@4.20.6)(yaml@2.6.0)
 
-  vitest@4.0.16(@opentelemetry/api@1.9.0)(@types/node@25.0.3)(@vitest/ui@4.0.8(vitest@4.0.8))(jiti@2.6.1)(jsdom@27.2.0(bufferutil@4.0.9))(lightningcss@1.32.0)(tsx@4.20.6)(yaml@2.6.0):
+  vitest@4.0.16(@opentelemetry/api@1.9.0)(@types/node@25.0.3)(@vitest/ui@4.0.8)(jiti@2.6.1)(jsdom@27.2.0(bufferutil@4.0.9))(lightningcss@1.32.0)(tsx@4.20.6)(yaml@2.6.0):
     dependencies:
       '@vitest/expect': 4.0.16
       '@vitest/mocker': 4.0.16(vite@7.3.1(@types/node@25.0.3)(jiti@2.6.1)(lightningcss@1.32.0)(tsx@4.20.6)(yaml@2.6.0))

@@ -909,18 +909,11 @@ export function PixelatedImage({
 }: {
   src: string
   /**
-   * URL of the tiny pixelated placeholder image. Use a static import so Vite
-   * inlines it as a base64 data URI (all placeholders are < 4KB, well under
-   * Vite's default assetsInlineLimit of 4096 bytes). This makes the
-   * placeholder available synchronously on first render with zero HTTP
-   * requests. Do NOT use dynamic imports or public/ paths — dynamic imports
-   * add a microtask delay, and public/ files bypass Vite's asset pipeline.
-   *
-   * @example
-   * ```tsx
-   * import placeholderScreenshot from "../assets/placeholders/placeholder-screenshot@2x.png";
-   * <PixelatedImage placeholder={placeholderScreenshot} src="/screenshot@2x.png" ... />
-   * ```
+   * Base64 data URI of the tiny pixelated placeholder image (~2–4KB PNG).
+   * Injected automatically by the server-side mdast image processor
+   * (website/src/lib/image-cache.ts) — no need to pass manually in MDX.
+   * The processor reads each image from public/, generates a 64px-wide
+   * placeholder with sharp, and caches it as JSON in .cache/images/.
    */
   placeholder?: string
   alt: string

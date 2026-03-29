@@ -3,8 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "placeholders": "tsx scripts/generate-placeholders.ts",
-    "build": "tsx scripts/generate-placeholders.ts && vite build",
+    "build": "vite build",
     "dev": "vite --port 8044",
     "typecheck": "tsc"
   },
@@ -15,6 +14,7 @@
     "@orama/orama": "^3.1.18",
     "@tailwindcss/typography": "^0.5.19",
     "@types/prismjs": "^1.26.6",
+    "image-size": "^2.0.2",
     "prismjs": "^1.30.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
