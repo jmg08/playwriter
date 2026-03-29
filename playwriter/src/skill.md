@@ -87,6 +87,8 @@ const contexts = browser.contexts()
 const otherProfilePage = contexts[1].pages()[0]
 ```
 
+`browser.contexts()` only makes sense when using `--direct`. in extension mode there is just one context for each session.
+
 **Limitations:** screen recording (`recording.start/stop`) is unavailable in direct mode.
 
 ### Execute code
@@ -192,8 +194,7 @@ You can collaborate with the user - they can help with captchas, difficult eleme
 
 - `state` - object persisted between calls **within your session**. Each session has its own isolated state. Use to store pages, data, listeners (e.g., `state.page = await context.newPage()`)
 - `page` - a default page (may be shared with other agents). Prefer creating your own page and storing it in `state` (see "working with pages")
-- `browser` - browser instance, access all contexts (profiles) via `browser.contexts()`
-- `context` - browser context (first profile), access all pages via `context.pages()`
+- `context` - browser context, access all pages via `context.pages()`
 - `require` - load Node.js modules (e.g., `const fs = require('node:fs')`). ESM `import` is not available in the sandbox
 - Node.js globals: `setTimeout`, `setInterval`, `fetch`, `URL`, `Buffer`, `crypto`, etc.
 
