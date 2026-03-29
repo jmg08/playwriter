@@ -998,6 +998,34 @@ function onDebuggerEvent(source: chrome.debugger.DebuggerSession, method: string
   logger.debug('Forwarding CDP event:', method, 'from tab:', source.tabId)
 
   if (method === 'Target.attachedToTarget' && params?.sessionId) {
+    const targetUrl = params.targetInfo?.url as string | undefined
+    // Filter out restricted child targets (other extensions' chrome-extension:// iframes,
+    // chrome:// pages, devtools://, etc). Without this, Chrome's debugger API throws
+    // "Cannot access a chrome-extension:// URL of a different extension" when the relay
+    // tries to send commands (e.g. Runtime.runIfWaitingForDebugger) to these targets,
+    // crashing the entire debugger session. See: https://github.com/remorses/playwriter/issues/18
+    if (isRestrictedUrl(targetUrl)) {
+      logger.debug(
+        'Ignoring restricted child target:',
+        targetUrl,
+        'sessionId:',
+        params.sessionId,
+        'for tab:',
+        source.tabId,
+      )
+      // Detach from the restricted child target to clean up. This command is sent on
+      // the parent tab's debugger session (not the child), so it won't trigger the
+      // restricted URL error.
+      if (source.tabId) {
+        chrome.debugger
+          .sendCommand({ tabId: source.tabId }, 'Target.detachFromTarget', { sessionId: params.sessionId })
+          .catch((e) => {
+            logger.debug('Failed to detach restricted child target (expected):', e)
+          })
+      }
+      return
+    }
+
     logger.debug('Child target attached:', params.sessionId, 'for tab:', source.tabId)
     const targetId = params.targetInfo?.targetId as string | undefined
     childSessions.set(params.sessionId, { tabId: source.tabId!, targetId })
@@ -1073,6 +1101,63 @@ type AttachTabResult = {
   sessionId: string
 }
 
+// Remove chrome-extension:// iframes from the page DOM before attaching the debugger.
+// Chrome's chrome.debugger.attach API refuses to attach to tabs that contain frames from
+// other extensions ("Cannot access a chrome-extension:// URL of different extension").
+// Extensions like LastPass, SurfingKeys, etc. inject chrome-extension:// iframes into every
+// page, breaking debugger attachment. This function temporarily removes them so the debugger
+// can attach. The iframes stay removed while the debugger is active — they're typically
+// re-injected by the owning extension on next page load.
+// See: https://github.com/remorses/playwriter/issues/18
+async function removeRestrictedIframes(tabId: number): Promise<number> {
+  try {
+    const results = await chrome.scripting.executeScript({
+      // allFrames: true ensures we also scan same-origin subframes, not just the top document.
+      target: { tabId, allFrames: true },
+      func: (ownExtIds: string[]) => {
+        // Traverse both the document and any open shadow roots, since some extensions
+        // inject their chrome-extension:// iframes inside shadow DOM.
+        const roots: ParentNode[] = [document]
+        const elements = document.querySelectorAll('*')
+        elements.forEach((el) => {
+          const shadow = (el as HTMLElement).shadowRoot
+          if (shadow) {
+            roots.push(shadow)
+          }
+        })
+
+        let removed = 0
+        for (const root of roots) {
+          root.querySelectorAll('iframe').forEach((iframe) => {
+            const src = iframe.src || iframe.getAttribute('src') || ''
+            if (!src.startsWith('chrome-extension://')) {
+              return
+            }
+            const extId = src.replace('chrome-extension://', '').split('/')[0]
+            if (ownExtIds.includes(extId)) {
+              return
+            }
+            iframe.remove()
+            removed++
+          })
+        }
+        return removed
+      },
+      args: [OUR_EXTENSION_IDS],
+    })
+    const totalRemoved = results.reduce((sum, r) => sum + (r.result ?? 0), 0)
+    if (totalRemoved > 0) {
+      logger.debug(`Removed ${totalRemoved} restricted chrome-extension:// iframe(s) from tab:`, tabId)
+    }
+    return totalRemoved
+  } catch (e) {
+    // Scripting may fail on restricted pages (chrome://, about:, etc.) — that's fine,
+    // those pages won't have extension iframes anyway.
+    logger.debug('Could not remove restricted iframes (expected on some pages):', (e as Error).message)
+    return 0
+  }
+}
+
 async function attachTab(
   tabId: number,
   { skipAttachedEvent = false }: { skipAttachedEvent?: boolean } = {},
@@ -1082,7 +1167,30 @@ async function attachTab(
 
   try {
     logger.debug('Attaching debugger to tab:', tabId)
-    await chrome.debugger.attach(debuggee, '1.3')
+
+    // Bounded retry loop: chrome.debugger.attach fails if the tab contains chrome-extension://
+    // iframes from other extensions. We remove them and retry, but aggressive extensions can
+    // re-inject between cleanup and retry, so we allow up to 3 attempts.
+    const maxAttachAttempts = 3
+    for (let attempt = 1; attempt <= maxAttachAttempts; attempt++) {
+      try {
+        await chrome.debugger.attach(debuggee, '1.3')
+        break
+      } catch (attachError: any) {
+        const msg = attachError.message ?? ''
+        const isRestrictedIframeError = msg.includes('chrome-extension://') || msg.includes('different extension')
+        if (!isRestrictedIframeError || attempt === maxAttachAttempts) {
+          throw attachError
+        }
+        logger.debug(
+          `Debugger attach blocked by chrome-extension:// iframe (attempt ${attempt}/${maxAttachAttempts}), removing and retrying:`,
+          tabId,
+        )
+        await removeRestrictedIframes(tabId)
+        await sleep(50)
+      }
+    }
+
     debuggerAttached = true
     logger.debug('Debugger attached successfully to tab:', tabId)
 

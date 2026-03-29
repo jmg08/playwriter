@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { chromium, type Page } from '@xmorse/playwright-core'
 import WebSocket from 'ws'
+import path from 'node:path'
 import { getCdpUrl } from './utils.js'
 import {
   setupTestContext,
@@ -13,12 +14,18 @@ import {
 import './test-declarations.js'
 
 const TEST_PORT = 19992
+const FIXTURE_EXTENSION_PATH = path.resolve('../extension/test-fixtures/fixture-extension')
 
 describe('Relay Navigation Tests', () => {
   let testCtx: TestContext | null = null
 
   beforeAll(async () => {
-    testCtx = await setupTestContext({ port: TEST_PORT, tempDirPrefix: 'pw-nav-test-', toggleExtension: true })
+    testCtx = await setupTestContext({
+      port: TEST_PORT,
+      tempDirPrefix: 'pw-nav-test-',
+      toggleExtension: true,
+      additionalExtensions: [FIXTURE_EXTENSION_PATH],
+    })
   }, 600000)
 
   afterAll(async () => {
@@ -753,6 +760,104 @@ describe('Relay Navigation Tests', () => {
 
       ws.close()
     } finally {
+      await page.close()
+      await server.close()
+    }
+  }, 30000)
+
+  it('should not crash when page has chrome-extension:// iframe from another extension', async () => {
+    // Reproduces https://github.com/remorses/playwriter/issues/18
+    // Extensions like LastPass, SurfingKeys inject chrome-extension:// iframes into every page.
+    // When playwriter attaches the debugger and Target.setAutoAttach is active, Chrome
+    // auto-attaches to these restricted iframe targets. Without filtering, the relay tries
+    // to send Runtime.runIfWaitingForDebugger to the restricted child session, which Chrome
+    // blocks with "Cannot access a chrome-extension:// URL of a different extension",
+    // causing the entire debugger to detach.
+
+    const browserContext = getBrowserContext()
+    const serviceWorker = await getExtensionServiceWorker(browserContext)
+
+    // Discover the fixture extension's ID from its service worker
+    const playwriterExtId = serviceWorker.url().match(/chrome-extension:\/\/([^/]+)/)?.[1]
+    expect(playwriterExtId).toBeTruthy()
+
+    let fixtureExtId: string | undefined
+    for (let i = 0; i < 50; i++) {
+      const allSws = browserContext.serviceWorkers()
+      const fixtureSw = allSws.find((sw) => {
+        const id = sw.url().match(/chrome-extension:\/\/([^/]+)/)?.[1]
+        return id && id !== playwriterExtId
+      })
+      if (fixtureSw) {
+        fixtureExtId = fixtureSw.url().match(/chrome-extension:\/\/([^/]+)/)?.[1]
+        break
+      }
+      await new Promise((r) => {
+        setTimeout(r, 100)
+      })
+    }
+    expect(fixtureExtId).toBeTruthy()
+    console.log('Fixture extension ID:', fixtureExtId)
+
+    // Create a page that embeds the fixture extension's page as an iframe,
+    // reproducing what extensions like SurfingKeys/LastPass do.
+    const server = await createSimpleServer({
+      routes: {
+        '/': `<!doctype html><html><body>
+          <h1>Main page</h1>
+          <iframe src="chrome-extension://${fixtureExtId}/page.html" id="ext-iframe"></iframe>
+        </body></html>`,
+      },
+    })
+
+    const page = await browserContext.newPage()
+    try {
+      await page.goto(server.baseUrl, { waitUntil: 'domcontentloaded' })
+      await page.bringToFront()
+
+      // Enable playwriter on this page — this must NOT crash the debugger
+      await withTimeout({
+        promise: serviceWorker.evaluate(async () => {
+          await globalThis.toggleExtensionForActiveTab()
+        }),
+        timeoutMs: 5000,
+        errorMessage: 'Timed out toggling extension on page with chrome-extension:// iframe',
+      })
+
+      // Give time for any async errors (Target.attachedToTarget for the iframe) to surface
+      await new Promise((r) => {
+        setTimeout(r, 1500)
+      })
+
+      // Verify the extension is still connected by connecting over CDP and interacting
+      const browser = await withTimeout({
+        promise: chromium.connectOverCDP(getCdpUrl({ port: TEST_PORT })),
+        timeoutMs: 5000,
+        errorMessage: 'Timed out connecting over CDP — extension likely crashed',
+      })
+      const context = browser.contexts()[0]
+      const cdpPage = context.pages().find((p) => p.url().startsWith(server.baseUrl))
+      expect(cdpPage).toBeDefined()
+
+      // Verify we can execute JS on the page (proves the debugger session is alive)
+      const title = await cdpPage!.evaluate(() => document.querySelector('h1')?.textContent)
+      expect(title).toBe('Main page')
+
+      // Verify the chrome-extension:// iframe did NOT get exposed as a frame
+      // (it should be filtered out as a restricted target)
+      const frames = cdpPage!.frames()
+      const extFrame = frames.find((f) => f.url().startsWith('chrome-extension://'))
+      expect(extFrame).toBeUndefined()
+
+      await browser.close()
+    } finally {
+      // Toggle off to clean up
+      await page.bringToFront()
+      await serviceWorker
+        .evaluate(async () => {
+          await globalThis.toggleExtensionForActiveTab()
+        })
+        .catch(() => {})
       await page.close()
       await server.close()
     }

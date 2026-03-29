@@ -35,25 +35,35 @@ async function buildExtension({ port, distDir }: { port: number; distDir: string
 
 export async function getExtensionServiceWorker(context: BrowserContext) {
   let serviceWorkers = context.serviceWorkers().filter((sw) => sw.url().startsWith('chrome-extension://'))
-  let serviceWorker = serviceWorkers[0]
-  if (!serviceWorker) {
-    serviceWorker = await context.waitForEvent('serviceworker', {
+  if (serviceWorkers.length === 0) {
+    await context.waitForEvent('serviceworker', {
       predicate: (sw) => sw.url().startsWith('chrome-extension://'),
     })
   }
 
+  // Check all chrome-extension service workers for the playwriter one (the one
+  // that exposes toggleExtensionForActiveTab). This handles cases where
+  // additional test fixture extensions are loaded alongside playwriter.
   for (let i = 0; i < 50; i++) {
-    const isReady = await serviceWorker.evaluate(() => {
-      // @ts-ignore
-      return typeof globalThis.toggleExtensionForActiveTab === 'function'
-    })
-    if (isReady) {
-      break
+    const allSws = context.serviceWorkers().filter((sw) => sw.url().startsWith('chrome-extension://'))
+    for (const sw of allSws) {
+      try {
+        const isReady = await sw.evaluate(() => {
+          // @ts-ignore
+          return typeof globalThis.toggleExtensionForActiveTab === 'function'
+        })
+        if (isReady) {
+          return sw
+        }
+      } catch {
+        // Service worker might not be ready yet
+      }
     }
     await new Promise((r) => setTimeout(r, 100))
   }
 
-  return serviceWorker
+  // Fallback to first service worker
+  return context.serviceWorkers().filter((sw) => sw.url().startsWith('chrome-extension://'))[0]
 }
 
 export interface TestContext {
@@ -66,11 +76,14 @@ export async function setupTestContext({
   port,
   tempDirPrefix,
   toggleExtension = false,
+  additionalExtensions = [],
 }: {
   port: number
   tempDirPrefix: string
   /** Create initial page and toggle extension on it */
   toggleExtension?: boolean
+  /** Additional extension paths to load alongside the main playwriter extension */
+  additionalExtensions?: string[]
 }): Promise<TestContext> {
   await killPortProcess({ port }).catch(() => {})
 
@@ -87,12 +100,13 @@ export async function setupTestContext({
 
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), tempDirPrefix))
   const extensionPath = path.resolve('../extension', distDir)
+  const allExtensionPaths = [extensionPath, ...additionalExtensions].join(',')
 
   const browserContext = await chromium.launchPersistentContext(userDataDir, {
     channel: 'chromium',
     headless: !process.env.HEADFUL,
     colorScheme: 'dark',
-    args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
+    args: [`--disable-extensions-except=${allExtensionPaths}`, `--load-extension=${allExtensionPaths}`],
   })
 
   const serviceWorker = await getExtensionServiceWorker(browserContext)

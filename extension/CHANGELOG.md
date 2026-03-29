@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.79
+
+### Bug Fixes
+
+- **Fix debugger crash on pages with chrome-extension:// iframes** ([#18](https://github.com/remorses/playwriter/issues/18)): Extensions like LastPass, SurfingKeys, and password managers inject `chrome-extension://` iframes into every page. Chrome's `chrome.debugger.attach` API refuses to attach to tabs containing these iframes, causing the extension to immediately disconnect after clicking the icon. Two-layer fix:
+  1. Before `chrome.debugger.attach`: detect the failure, remove restricted iframes via `chrome.scripting.executeScript`, then retry attachment.
+  2. After attachment: filter `Target.attachedToTarget` events for restricted child targets in `onDebuggerEvent`, preventing the relay from sending CDP commands to restricted sessions.
+- **Add `scripting` permission**: Required for the iframe cleanup workaround above.
+
 ## 0.0.78
 
 ### Changes
