@@ -92,10 +92,7 @@
   --grid-gap: 50px;
   --grid-content-width: 520px;
   --grid-sidebar-width: var(--grid-toc-width);
-  --grid-max-width: calc(
-    var(--grid-toc-width) + var(--grid-gap) + var(--grid-content-width)
-    + var(--grid-gap) + var(--grid-sidebar-width)
-  );
+  --grid-max-width: min(calc(100vw - 60px), 1100px);
   --mobile-padding: 1.25rem;
 
   /* Spacing scale */
