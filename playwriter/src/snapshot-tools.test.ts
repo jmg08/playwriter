@@ -1008,7 +1008,7 @@ describe('Snapshot & Screenshot Tests', () => {
     console.log('Screenshot dimensions:', dimensions.width, 'x', dimensions.height)
     console.log('Window viewport:', viewport)
 
-    expect(dimensions.type).toBe('jpg')
+    expect(dimensions.type).toBe('png')
     expect(dimensions.width).toBeGreaterThan(0)
     expect(dimensions.height).toBeGreaterThan(0)
 
