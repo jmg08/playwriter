@@ -31,22 +31,6 @@ importers:
         specifier: ^4.0.8
         version: 4.0.8(@types/debug@4.1.13)(@types/node@25.2.0)(@vitest/ui@4.0.8)(jiti@2.6.1)(jsdom@27.2.0(bufferutil@4.0.9))(lightningcss@1.32.0)(tsx@4.20.6)(yaml@2.6.0)
 
-  chromium-debugger-attach-repro:
-    dependencies:
-      playwright:
-        specifier: ^1.59.1
-        version: 1.59.1
-    devDependencies:
-      '@types/node':
-        specifier: ^24.10.1
-        version: 24.10.1
-      tsx:
-        specifier: ^4.20.6
-        version: 4.20.6
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
-
   extension:
     dependencies:
       playwriter:
@@ -4940,18 +4924,8 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
-  playwright-core@1.59.1:
-    resolution: {integrity: sha512-HBV/RJg81z5BiiZ9yPzIiClYV/QMsDCKUyogwH9p3MCP6IYjUFu/MActgYAvK0oWyV9NlwM3GLBjADyWgydVyg==}
-    engines: {node: '>=18'}
-    hasBin: true
-
   playwright@1.57.0:
     resolution: {integrity: sha512-ilYQj1s8sr2ppEJ2YVadYBN0Mb3mdo9J0wQ+UuDhzYqURwSoW4n1Xs5vs7ORwgDGmyEh33tRMeS8KhdkMoLXQw==}
-    engines: {node: '>=18'}
-    hasBin: true
-
-  playwright@1.59.1:
-    resolution: {integrity: sha512-C8oWjPR3F81yljW9o5OxcWzfh6avkVwDD2VYdwIGqTkl+OGFISgypqzfu7dOe4QNLL2aqcWBmI3PMtLIK233lw==}
     engines: {node: '>=18'}
     hasBin: true
 
@@ -11285,17 +11259,9 @@ snapshots:
 
   playwright-core@1.57.0: {}
 
-  playwright-core@1.59.1: {}
-
   playwright@1.57.0:
     dependencies:
       playwright-core: 1.57.0
-    optionalDependencies:
-      fsevents: 2.3.2
-
-  playwright@1.59.1:
-    dependencies:
-      playwright-core: 1.59.1
     optionalDependencies:
       fsevents: 2.3.2
 
